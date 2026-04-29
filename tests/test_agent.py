@@ -154,3 +154,41 @@ def test_invalid_json_raises(settings, server, console):
     backend = FakeBackend(responses=["this is not json at all"])
     with pytest.raises(RuntimeError, match="parseable JSON"):
         agent.ask("뭐든", [server], settings=settings, console=console, backend=backend)
+
+
+def test_permission_gate_blocks_mutation_on_read_only_server(monkeypatch, settings, server, console):
+    """read-only 서버에 mv 같은 변경 명령이 plan 으로 나와도 권한 게이트가 차단."""
+    monkeypatch.setattr(
+        agent, "run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    backend = FakeBackend(responses=[
+        json.dumps({"steps": [{"server": "web-1", "command": "mv /tmp/a /tmp/b"}]}),
+        "권한이 부족해 실행하지 못했습니다.",
+    ])
+    outcome = agent.ask("정리해줘", [server], settings=settings, console=console, backend=backend)
+
+    assert outcome.n_blocked == 1
+    # summarize 에 결과(blocked)가 포함됐는지
+    assert "blocked" in backend.calls[1] or "permission" in backend.calls[1]
+
+
+def test_dry_run_skips_execution_and_summarize(monkeypatch, settings, server, console):
+    """dry_run=True 면 SSH 실행도, summarize LLM 호출도 안 함."""
+    monkeypatch.setattr(
+        agent, "run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run on dry-run")),
+    )
+    backend = FakeBackend(responses=[
+        json.dumps({"steps": [{"server": "web-1", "command": "df -h"}]})
+        # summarize 응답 없음 — 호출되면 큐 고갈로 실패할 것
+    ])
+    outcome = agent.ask(
+        "디스크 상태", [server], settings=settings, console=console,
+        backend=backend, dry_run=True,
+    )
+
+    assert outcome.n_steps == 1
+    assert "[DRY-RUN]" in outcome.final_text
+    assert "df -h" in outcome.final_text
+    assert len(backend.calls) == 1  # plan 한 번만

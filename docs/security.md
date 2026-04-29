@@ -24,12 +24,20 @@
 - 기록 항목: ts, server, mode, prompt, command, exit_code, stdout, stderr, llm_model, tokens
 - history DB 자체도 `.gitignore` 대상 (운영 정보 포함)
 
-## 권한 모드 (Phase 3)
+## 권한 모드 (구현됨)
 
-`inventory.role` 별 차등 정책:
-- `read-only`: ls, cat, df, top 류만 허용 (allowlist)
-- `shell`: 일반 운영 명령 허용, destructive 차단 강화
-- `sudo`: 전체 허용, 단 destructive 시 항상 confirm
+`inventory.role` 별 차등 정책. `safety` 게이트와 별개로 작동하는 두 번째 게이트:
+- `read-only`: 정보 조회·텍스트 가공 명령만 allowlist 통과
+  (ls, cat, df, du, free, ps, top, journalctl, systemctl status, docker ps, kubectl get, grep, awk, find, …)
+  - 상태 변경 서브명령 차단: `systemctl restart/start/stop/reload/enable/disable`, `docker run/exec/rm/build`, `kubectl apply/delete/patch` …
+  - 쓰기 리다이렉션 차단: `> file`, `>> file`, `tee` (without `-a`)
+  - 변경 HTTP 메서드 차단: `curl -X POST/PUT/DELETE`, `curl -d`, `wget --post-data` …
+- `shell`: 권한 게이트 통과(safety 게이트만 작동)
+- `sudo`: 권한 게이트 통과(safety 게이트만 작동)
+
+**fan-out 시 가장 엄격한 role 기준** — 대상 서버 중 하나라도 `read-only` 면 그 정책으로 검사. 안전 우선.
+
+`exec`/`ask` 모두 적용. `--dry-run` 옵션으로 게이트만 검사하고 실제 SSH 실행은 건너뜀.
 
 ## 점검 체크리스트
 

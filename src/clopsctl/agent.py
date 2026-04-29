@@ -21,6 +21,7 @@ from rich.console import Console
 from .config import Server, Settings
 from .history import record
 from .llm import LLMBackend
+from .permissions import is_allowed_for_role, strictest_role
 from .safety import is_dangerous
 from .ssh import ExecResult, fan_out, run
 
@@ -116,6 +117,14 @@ def _serialize_result(r: ExecResult) -> dict[str, Any]:
     }
 
 
+def _record_block(db_path, server: str, command: str, prompt: str, reason: str) -> None:
+    record(
+        db_path,
+        server=server, mode="ask", command=command, prompt=prompt,
+        exit_code=None, stderr=reason,
+    )
+
+
 def _execute_plan(
     steps: list[dict[str, Any]],
     *,
@@ -123,6 +132,7 @@ def _execute_plan(
     settings: Settings,
     prompt: str,
     console: Console,
+    dry_run: bool = False,
 ) -> tuple[list[dict[str, Any]], int, int]:
     results: list[dict[str, Any]] = []
     n_blocked = 0
@@ -134,52 +144,60 @@ def _execute_plan(
             results.append({"server": "?", "error": "empty command in plan", "skipped": True})
             continue
 
+        # 1) safety 게이트 (전체 공통)
         flagged = is_dangerous(command)
         if flagged:
             n_blocked += 1
-            console.print(f"[yellow]✗ blocked[/yellow] {command!r} (pattern: {flagged})")
+            console.print(f"[yellow]✗ safety[/yellow] {command!r} (pattern: {flagged})")
             target_names = step.get("servers") or ([step["server"]] if step.get("server") else [])
             for n in target_names:
-                record(
-                    settings.history_db,
-                    server=n,
-                    mode="ask",
-                    command=command,
-                    prompt=prompt,
-                    exit_code=None,
-                    stderr=f"safety gate blocked: {flagged}",
-                )
-                results.append(
-                    {"server": n, "blocked": True, "pattern": flagged, "command": command}
-                )
+                _record_block(settings.history_db, n, command, prompt, f"safety gate blocked: {flagged}")
+                results.append({"server": n, "blocked": "safety", "pattern": flagged, "command": command})
             continue
 
+        # 2) 대상 서버 해석
         if "servers" in step:
             names = step["servers"] or []
-            unknown = [n for n in names if n not in inventory]
-            if unknown:
-                results.append({"error": f"unknown servers: {unknown}", "command": command})
-                n_failed += 1
-                continue
-            console.print(f"[dim]→ fan_out {names} :: {command}[/dim]")
-            for r in fan_out([inventory[n] for n in names], command):
-                record(
-                    settings.history_db,
-                    server=r.server, mode="ask", command=command, prompt=prompt,
-                    exit_code=r.exit_code, stdout=r.stdout, stderr=r.stderr or (r.error or ""),
-                    llm_model=settings.model,
-                )
-                results.append(_serialize_result(r))
-                if r.exit_code != 0 and r.error:
-                    n_failed += 1
+        elif step.get("server"):
+            names = [step["server"]]
         else:
-            name = step.get("server")
-            if not name or name not in inventory:
-                results.append({"error": f"unknown server: {name}", "command": command})
-                n_failed += 1
-                continue
-            console.print(f"[dim]→ exec {name} :: {command}[/dim]")
-            r = run(inventory[name], command)
+            results.append({"error": "step has neither 'server' nor 'servers'", "command": command})
+            n_failed += 1
+            continue
+
+        unknown = [n for n in names if n not in inventory]
+        if unknown:
+            results.append({"error": f"unknown servers: {unknown}", "command": command})
+            n_failed += 1
+            continue
+        target_servers = [inventory[n] for n in names]
+
+        # 3) 권한 게이트 (가장 엄격한 role 기준)
+        role = strictest_role(target_servers)
+        perm_reason = is_allowed_for_role(command, role)
+        if perm_reason:
+            n_blocked += 1
+            console.print(f"[yellow]✗ permission[/yellow] {command!r} ({perm_reason})")
+            for n in names:
+                _record_block(settings.history_db, n, command, prompt, f"permission denied: {perm_reason}")
+                results.append({"server": n, "blocked": "permission", "reason": perm_reason, "command": command})
+            continue
+
+        # 4) dry-run 이면 실행 대신 plan 만 기록
+        if dry_run:
+            console.print(f"[cyan]∘ dry-run[/cyan] {names} :: {command}")
+            for n in names:
+                results.append({"server": n, "dry_run": True, "command": command})
+            continue
+
+        # 5) 실제 실행
+        if len(target_servers) > 1:
+            console.print(f"[dim]→ fan_out {names} :: {command}[/dim]")
+            execs = fan_out(target_servers, command)
+        else:
+            console.print(f"[dim]→ exec {names[0]} :: {command}[/dim]")
+            execs = [run(target_servers[0], command)]
+        for r in execs:
             record(
                 settings.history_db,
                 server=r.server, mode="ask", command=command, prompt=prompt,
@@ -200,6 +218,7 @@ def ask(
     settings: Settings,
     console: Console,
     backend: LLMBackend,
+    dry_run: bool = False,
 ) -> AskOutcome:
     inventory = {s.name: s for s in targets}
 
@@ -215,8 +234,25 @@ def ask(
     if not steps:
         console.print("[dim](no SSH commands proposed — summarizing directly)[/dim]")
 
+    if dry_run:
+        # dry-run: plan 까지만 보고하고 LLM summarize 도 건너뜀 (비용 절감)
+        results, n_blocked, n_failed = _execute_plan(
+            steps, inventory=inventory, settings=settings, prompt=prompt,
+            console=console, dry_run=True,
+        )
+        plan_summary = "\n".join(
+            f"- {s.get('servers', [s.get('server')])} :: {s.get('command')}" for s in steps
+        ) or "(plan empty)"
+        return AskOutcome(
+            final_text=f"[DRY-RUN] 실행하지 않았습니다. 제안된 plan:\n{plan_summary}",
+            backend_name=backend.name,
+            n_steps=len(steps),
+            n_blocked=n_blocked,
+            n_failed=n_failed,
+        )
+
     results, n_blocked, n_failed = _execute_plan(
-        steps, inventory=inventory, settings=settings, prompt=prompt, console=console
+        steps, inventory=inventory, settings=settings, prompt=prompt, console=console,
     )
 
     summary_prompt = SUMMARIZE_INSTRUCTION.format(

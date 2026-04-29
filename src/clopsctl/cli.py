@@ -101,6 +101,10 @@ def exec_cmd(
     command: str = typer.Argument(..., help="원격에서 실행할 명령"),
     yes: bool = typer.Option(False, "--yes", "-y", help="위험 명령 confirm 건너뛰기"),
     dry_run: bool = typer.Option(False, "--dry-run", help="실행 없이 게이트 검사만"),
+    per_server: bool = typer.Option(
+        False, "--per-server",
+        help="권한 게이트를 서버별 개별 검사 (통과한 서버에만 실행). 기본은 strict (가장 엄격한 role 기준)",
+    ),
 ) -> None:
     """LLM 거치지 않고 N대에 동일 명령 fan-out 실행."""
     from .permissions import is_allowed_for_role, strictest_role
@@ -117,23 +121,42 @@ def exec_cmd(
 
     servers = _resolve_servers(targets)
 
-    # 2) 권한 게이트 (가장 엄격한 role 기준)
-    role = strictest_role(servers)
-    perm_reason = is_allowed_for_role(command, role)
-    if perm_reason:
-        err_console.print(f"[red]권한 거부:[/red] {perm_reason}")
-        err_console.print(f"대상 서버 중 가장 엄격한 role: [bold]{role}[/bold]")
-        for r in servers:
-            record(
-                settings.history_db, server=r.name, mode="exec", command=command,
-                exit_code=None, stderr=f"permission denied: {perm_reason}",
-            )
-        raise typer.Exit(code=1)
+    # 2) 권한 게이트 — strict 또는 per-server
+    mode = "per_server" if per_server else (settings.permission_mode or "strict").lower()
+    if mode == "per_server":
+        passing: list = []
+        for srv in servers:
+            reason = is_allowed_for_role(command, srv.role)
+            if reason is None:
+                passing.append(srv)
+            else:
+                err_console.print(f"[yellow]✗ {srv.name}[/yellow] 권한 거부: {reason}")
+                record(
+                    settings.history_db, server=srv.name, mode="exec", command=command,
+                    exit_code=None, stderr=f"permission denied: {reason}",
+                )
+        if not passing:
+            err_console.print("[red]모든 서버가 권한 거부되어 실행 대상이 없습니다.[/red]")
+            raise typer.Exit(code=1)
+        servers = passing
+        role = strictest_role(servers)
+    else:
+        role = strictest_role(servers)
+        perm_reason = is_allowed_for_role(command, role)
+        if perm_reason:
+            err_console.print(f"[red]권한 거부:[/red] {perm_reason}")
+            err_console.print(f"대상 서버 중 가장 엄격한 role: [bold]{role}[/bold]  (--per-server 로 서버별 검사 가능)")
+            for r in servers:
+                record(
+                    settings.history_db, server=r.name, mode="exec", command=command,
+                    exit_code=None, stderr=f"permission denied: {perm_reason}",
+                )
+            raise typer.Exit(code=1)
 
     # 3) dry-run
     if dry_run:
         console.print(f"[cyan]∘ dry-run[/cyan] {[s.name for s in servers]} :: {command}")
-        console.print(f"[dim]role={role}  safety={'flagged' if flagged else 'ok'}  permission=ok[/dim]")
+        console.print(f"[dim]mode={mode}  role={role}  safety={'flagged' if flagged else 'ok'}  permission=ok[/dim]")
         return
 
     # 4) 실제 실행
@@ -159,12 +182,20 @@ def ask_cmd(
         help="LLM 백엔드 (claude|gemini|codex). 미지정 시 환경변수 또는 PATH 자동 감지",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="plan 만 표시하고 실제 SSH 실행과 summarize 건너뜀"),
+    per_server: bool = typer.Option(
+        False, "--per-server",
+        help="권한 게이트를 서버별 개별 검사 (통과한 서버에만 실행)",
+    ),
 ) -> None:
     """LLM 경유 자연어 명령 — 로컬 claude/gemini/codex CLI 활용."""
+    import dataclasses
+
     from . import agent
     from . import llm
 
     settings = load_settings()
+    if per_server:
+        settings = dataclasses.replace(settings, permission_mode="per_server")
     try:
         backend = llm.select_backend(backend_name or settings.llm_backend)
     except RuntimeError as exc:

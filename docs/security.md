@@ -35,7 +35,9 @@
 - `shell`: 권한 게이트 통과(safety 게이트만 작동)
 - `sudo`: 권한 게이트 통과(safety 게이트만 작동)
 
-**fan-out 시 가장 엄격한 role 기준** — 대상 서버 중 하나라도 `read-only` 면 그 정책으로 검사. 안전 우선.
+**기본(strict): fan-out 시 가장 엄격한 role 기준** — 대상 중 하나라도 `read-only` 면 그 정책으로 전체 차단. 안전 우선.
+
+**per_server 모드** (`CLOPSCTL_PERMISSION_MODE=per_server` 또는 `--per-server`): 서버별 개별 검사 — 통과한 서버에만 실행하고 차단된 서버는 history 에 사유와 함께 기록. 혼합 role 클러스터에서 안전한 명령은 가능한 곳까지 굴리고 싶을 때 사용.
 
 `exec`/`ask` 모두 적용. `--dry-run` 옵션으로 게이트만 검사하고 실제 SSH 실행은 건너뜀.
 

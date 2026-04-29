@@ -40,6 +40,7 @@ class Settings:
     web_host: str
     web_port: int
     llm_backend: str | None  # "claude" | "gemini" | "codex" | None(자동 감지)
+    permission_mode: str  # "strict" (기본, 안전 우선) | "per_server"
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -55,6 +56,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         web_host=os.getenv("CLOPSCTL_WEB_HOST", "127.0.0.1"),
         web_port=int(os.getenv("CLOPSCTL_WEB_PORT", "8765")),
         llm_backend=os.getenv("CLOPSCTL_LLM_BACKEND"),
+        permission_mode=os.getenv("CLOPSCTL_PERMISSION_MODE", "strict"),
     )
 
 

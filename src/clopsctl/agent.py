@@ -149,6 +149,7 @@ def _execute_plan(
     results: list[dict[str, Any]] = []
     n_blocked = 0
     n_failed = 0
+    permission_mode = (settings.permission_mode or "strict").lower()
 
     for idx, step in enumerate(steps):
         command = (step.get("command") or "").strip()
@@ -187,17 +188,39 @@ def _execute_plan(
             continue
         target_servers = [inventory[n] for n in names]
 
-        # 3) 권한 게이트 (가장 엄격한 role 기준)
-        role = strictest_role(target_servers)
-        perm_reason = is_allowed_for_role(command, role)
-        if perm_reason:
-            n_blocked += 1
-            console.print(f"[yellow]✗ permission[/yellow] {command!r} ({perm_reason})")
-            for n in names:
-                _record_block(settings.history_db, n, command, prompt, f"permission denied: {perm_reason}")
-                results.append({"server": n, "blocked": "permission", "reason": perm_reason, "command": command})
-            _emit(on_event, "step_blocked", step=idx, reason="permission", detail=perm_reason, command=command, servers=names)
-            continue
+        # 3) 권한 게이트
+        if permission_mode == "per_server":
+            # 서버별 개별 검사 — 통과한 서버만 실행, 차단된 서버는 별도 결과로 기록
+            passing: list[Server] = []
+            for srv in target_servers:
+                reason = is_allowed_for_role(command, srv.role)
+                if reason is None:
+                    passing.append(srv)
+                else:
+                    n_blocked += 1
+                    console.print(f"[yellow]✗ permission[/yellow] {srv.name} ({reason})")
+                    _record_block(settings.history_db, srv.name, command, prompt, f"permission denied: {reason}")
+                    results.append({"server": srv.name, "blocked": "permission", "reason": reason, "command": command})
+                    _emit(on_event, "step_blocked", step=idx, reason="permission",
+                          detail=reason, command=command, servers=[srv.name])
+            if not passing:
+                continue  # 모두 차단됨 — 다음 step
+            target_servers = passing
+            names = [s.name for s in passing]
+            role = strictest_role(target_servers)
+        else:
+            # strict 모드: 가장 엄격한 role 기준으로 전부 차단 또는 전부 통과
+            role = strictest_role(target_servers)
+            perm_reason = is_allowed_for_role(command, role)
+            if perm_reason:
+                n_blocked += 1
+                console.print(f"[yellow]✗ permission[/yellow] {command!r} ({perm_reason})")
+                for n in names:
+                    _record_block(settings.history_db, n, command, prompt, f"permission denied: {perm_reason}")
+                    results.append({"server": n, "blocked": "permission", "reason": perm_reason, "command": command})
+                _emit(on_event, "step_blocked", step=idx, reason="permission",
+                      detail=perm_reason, command=command, servers=names)
+                continue
 
         # 4) dry-run 이면 실행 대신 plan 만 기록
         if dry_run:

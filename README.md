@@ -101,7 +101,9 @@ ruff check .
 - [x] Phase 2-c-1: web UI ask 실행 폼 (localhost-only, POST 폼)
 - [x] Phase 2-c-2: 권한 모드 allowlist + `--dry-run` 옵션
 - [x] Phase 2-c-3: web UI 실시간 스트리밍 (SSE 단계별 진행 표시)
-- [ ] Phase 3: Windows/macOS 호환 검증, role 별 개별 권한 검사 옵션
+- [x] Phase 3-a: per-server 권한 모드 (`--per-server` / `CLOPSCTL_PERMISSION_MODE`)
+- [x] Phase 3-b: 호환성 노트 (`docs/compatibility.md`)
+- [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
 
 ## 라이선스
 

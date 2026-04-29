@@ -41,6 +41,7 @@ def settings(tmp_path: Path) -> Settings:
         web_host="127.0.0.1",
         web_port=8765,
         llm_backend="fake",
+        permission_mode="strict",
     )
 
 

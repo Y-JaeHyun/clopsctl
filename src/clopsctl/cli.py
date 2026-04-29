@@ -268,16 +268,27 @@ def history_cmd(
 
 @app.command("web")
 def web(
-    host: str | None = typer.Option(None, "--host"),
-    port: int | None = typer.Option(None, "--port"),
+    host: str | None = typer.Option(None, "--host", help="bind 주소 (기본 127.0.0.1). 외부 접근은 0.0.0.0 — 보안 주의"),
+    port: int | None = typer.Option(None, "--port", help="bind 포트 (기본 CLOPSCTL_WEB_PORT 또는 8765)"),
 ) -> None:
-    """로컬 웹 UI 실행 (Phase 2 본격 구현)."""
+    """웹 UI 실행 — 인벤토리/히스토리 + ask 폼 + SSE 스트리밍."""
     import uvicorn
     settings = load_settings()
+    bind_host = host or settings.web_host
+    bind_port = port or settings.web_port
+
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        err_console.print(
+            f"[bold yellow]⚠ 외부 접근 가능한 호스트({bind_host})에 바인드합니다.[/bold yellow]\n"
+            f"[yellow]이 UI 는 인증이 없으며 SSH 명령 실행을 트리거할 수 있습니다.\n"
+            f"신뢰된 네트워크에서만 사용하거나 ssh -L 포트포워딩, VPN, 방화벽 규칙으로 접근을 제한하세요.[/yellow]"
+        )
+
+    console.print(f"[dim]uvicorn → http://{bind_host}:{bind_port}[/dim]")
     uvicorn.run(
         "clopsctl.web:app",
-        host=host or settings.web_host,
-        port=port or settings.web_port,
+        host=bind_host,
+        port=bind_port,
         reload=False,
     )
 

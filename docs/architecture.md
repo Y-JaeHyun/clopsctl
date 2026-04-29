@@ -38,10 +38,13 @@
 
 > 단순 텍스트 in/out 만 쓰므로 claude, gemini, codex 어느 CLI 라도 동등하게 동작.
 
-### web 모드 (Phase 2)
-- `clopsctl web` → 로컬 127.0.0.1 바인드 FastAPI
-- 1차: 인벤토리/히스토리 read-only
-- 후속: 실행 폼, WebSocket 스트리밍, 히스토리 검색
+### web 모드 (구현됨)
+- `clopsctl web` → 127.0.0.1:8765 바인드 FastAPI (외부 노출 금지, 페이지에 경고 배너)
+- `GET /` — 인벤토리, 히스토리 20건, ask 폼 (서버 체크박스 + 프롬프트 + 백엔드 선택 + dry-run)
+- `POST /ask` — `agent.ask()` 호출 후 결과 HTML 페이지 렌더 (현재는 동기 응답)
+- `GET /healthz` — 버전/백엔드 가용성 JSON
+- 모든 동적 값은 `html.escape()` 처리 (XSS 방지, 단위 테스트로 검증)
+- 후속(Phase 2-c-3): WebSocket/SSE 스트리밍, 진행 표시기
 
 ## 디자인 결정
 

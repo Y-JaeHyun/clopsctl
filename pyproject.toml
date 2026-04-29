@@ -19,6 +19,7 @@ dependencies = [
     "tomli>=2.0;python_version<'3.11'",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

@@ -6,7 +6,7 @@
 - **CLI**: Typer / Rich
 - **SSH**: paramiko (병렬 fan-out)
 - **LLM**: 로컬에 설치된 `claude` / `gemini` / `codex` CLI 를 subprocess 로 호출 — API key 직접 관리 불필요
-- **Web**: FastAPI (Phase 2 read-only stub)
+- **Web**: FastAPI — 인벤토리/히스토리 + ask 실행 폼 (localhost-only)
 - **히스토리**: SQLite append-only
 - **상태**: 0.0.2 — `exec` + `ask`(Plan→Execute→Summarize) 동작, web UI 폼은 Phase 2-c
 
@@ -67,9 +67,11 @@ clopsctl history --limit 30
 clopsctl history --server web-1
 clopsctl history --grep "디스크"
 
-# 웹 UI (Phase 2 read-only stub)
+# 웹 UI — 인벤토리/히스토리 조회 + ask 실행 폼 (반드시 localhost only)
 clopsctl web
 # → http://127.0.0.1:8765
+#   - 서버 체크박스 + 프롬프트 + 백엔드 선택 + dry-run
+#   - POST /ask 로 실행 → 결과 페이지 렌더
 ```
 
 ## 보안
@@ -96,8 +98,10 @@ ruff check .
 - [x] Phase 1 PoC: 마스터 환경 검증, LLM CLI 가용성
 - [x] Phase 2-a: 스캐폴드 + `exec` fan-out + history + web stub
 - [x] Phase 2-b: `ask` 모드 (claude/gemini/codex CLI Plan→Execute→Summarize)
-- [ ] Phase 2-c: web UI 실행 폼/스트리밍
-- [ ] Phase 3: Windows/macOS 호환 검증, 권한 모드 분리, allowlist 정책, ask confirm gate
+- [x] Phase 2-c-1: web UI ask 실행 폼 (localhost-only, POST 폼)
+- [x] Phase 2-c-2: 권한 모드 allowlist + `--dry-run` 옵션
+- [ ] Phase 2-c-3: web UI 실시간 스트리밍 (현재는 동기 응답)
+- [ ] Phase 3: Windows/macOS 호환 검증, role 별 개별 권한 검사 옵션
 
 ## 라이선스
 

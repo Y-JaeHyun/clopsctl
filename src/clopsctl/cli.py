@@ -129,17 +129,38 @@ def exec_cmd(
 
 
 @app.command("ask")
-def ask(
+def ask_cmd(
     targets: str = typer.Argument(..., help="콤마로 구분된 서버 이름들"),
     prompt: str = typer.Argument(..., help="자연어 프롬프트"),
 ) -> None:
-    """LLM 경유 자연어 명령 (Phase 2 구현 예정)."""
-    err_console.print(
-        "[yellow]ask 모드는 Phase 2 에서 구현됩니다[/yellow]\n"
-        f"대상={targets!r} prompt={prompt!r}\n"
-        "현재는 `clopsctl exec` 또는 `claude` (mcp-ssh-manager 연동) 를 직접 사용하세요."
+    """LLM 경유 자연어 명령 (Anthropic SDK + tool_use 루프)."""
+    from . import agent  # 지연 import — anthropic 미설치 환경에서도 다른 명령은 동작
+
+    settings = load_settings()
+    if not settings.anthropic_api_key:
+        err_console.print(
+            "[red]ANTHROPIC_API_KEY 가 .env 에 설정되어 있지 않습니다.[/red]\n"
+            "cp .env.example .env && chmod 600 .env  # 그 후 키 입력"
+        )
+        raise typer.Exit(code=2)
+
+    selected = _resolve_servers(targets)
+    console.print(
+        f"[dim]ask: {len(selected)} server(s) → {settings.model}[/dim]"
     )
-    raise typer.Exit(code=2)
+    try:
+        outcome = agent.ask(prompt, selected, settings=settings, console=console)
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"ask 실패: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print()
+    console.print(Panel(outcome.final_text, title="answer", border_style="cyan"))
+    console.print(
+        f"[dim]iterations={outcome.iterations}  "
+        f"in={outcome.input_tokens}  out={outcome.output_tokens}  "
+        f"cache_read={outcome.cache_read_tokens}  cache_write={outcome.cache_creation_tokens}[/dim]"
+    )
 
 
 @app.command("history")

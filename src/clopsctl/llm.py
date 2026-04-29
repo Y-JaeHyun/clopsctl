@@ -47,19 +47,24 @@ class CLIBackend:
             raise RuntimeError(f"{self.name} CLI timed out after {timeout}s") from exc
 
         if proc.returncode != 0:
+            # 일부 CLI 는 인증 실패 등을 stdout 에 출력 → 둘 다 노출해야 디버깅 가능
             stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            detail = stderr or stdout or "(empty output)"
             raise RuntimeError(
-                f"{self.name} CLI exited {proc.returncode}: {stderr[:500] or '(no stderr)'}"
+                f"{self.name} CLI exited {proc.returncode}: {detail[:500]}"
             )
         return proc.stdout
 
 
 def claude_backend() -> CLIBackend:
-    # `claude --print` 는 stdin 으로 prompt 받음. --bare 로 사용자 CLAUDE.md 자동 로드 차단.
+    # `claude --print` 는 stdin 으로 prompt 받음. OAuth/keychain 인증 호환을 위해
+    # --bare 는 사용하지 않음 (--bare 는 ANTHROPIC_API_KEY 만 허용해서 OAuth 로그인
+    # 한 환경에서는 'Not logged in' 으로 즉시 종료됨).
     return CLIBackend(
         name="claude",
         binary="claude",
-        args_factory=lambda: ["--print", "--bare"],
+        args_factory=lambda: ["--print"],
     )
 
 

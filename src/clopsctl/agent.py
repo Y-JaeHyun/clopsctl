@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from typing import Callable
+
 from rich.console import Console
 
 from .config import Server, Settings
@@ -125,6 +127,15 @@ def _record_block(db_path, server: str, command: str, prompt: str, reason: str) 
     )
 
 
+EventCallback = Callable[[dict[str, Any]], None]
+
+
+def _emit(cb: EventCallback | None, event_type: str, **data: Any) -> None:
+    if cb is None:
+        return
+    cb({"type": event_type, **data})
+
+
 def _execute_plan(
     steps: list[dict[str, Any]],
     *,
@@ -133,12 +144,13 @@ def _execute_plan(
     prompt: str,
     console: Console,
     dry_run: bool = False,
+    on_event: EventCallback | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     results: list[dict[str, Any]] = []
     n_blocked = 0
     n_failed = 0
 
-    for step in steps:
+    for idx, step in enumerate(steps):
         command = (step.get("command") or "").strip()
         if not command:
             results.append({"server": "?", "error": "empty command in plan", "skipped": True})
@@ -153,6 +165,7 @@ def _execute_plan(
             for n in target_names:
                 _record_block(settings.history_db, n, command, prompt, f"safety gate blocked: {flagged}")
                 results.append({"server": n, "blocked": "safety", "pattern": flagged, "command": command})
+            _emit(on_event, "step_blocked", step=idx, reason="safety", pattern=flagged, command=command, servers=target_names)
             continue
 
         # 2) 대상 서버 해석
@@ -163,12 +176,14 @@ def _execute_plan(
         else:
             results.append({"error": "step has neither 'server' nor 'servers'", "command": command})
             n_failed += 1
+            _emit(on_event, "step_failed", step=idx, reason="malformed step", command=command)
             continue
 
         unknown = [n for n in names if n not in inventory]
         if unknown:
             results.append({"error": f"unknown servers: {unknown}", "command": command})
             n_failed += 1
+            _emit(on_event, "step_failed", step=idx, reason=f"unknown servers: {unknown}", command=command)
             continue
         target_servers = [inventory[n] for n in names]
 
@@ -181,6 +196,7 @@ def _execute_plan(
             for n in names:
                 _record_block(settings.history_db, n, command, prompt, f"permission denied: {perm_reason}")
                 results.append({"server": n, "blocked": "permission", "reason": perm_reason, "command": command})
+            _emit(on_event, "step_blocked", step=idx, reason="permission", detail=perm_reason, command=command, servers=names)
             continue
 
         # 4) dry-run 이면 실행 대신 plan 만 기록
@@ -188,9 +204,11 @@ def _execute_plan(
             console.print(f"[cyan]∘ dry-run[/cyan] {names} :: {command}")
             for n in names:
                 results.append({"server": n, "dry_run": True, "command": command})
+            _emit(on_event, "step_dry_run", step=idx, command=command, servers=names)
             continue
 
         # 5) 실제 실행
+        _emit(on_event, "step_start", step=idx, command=command, servers=names, role=role)
         if len(target_servers) > 1:
             console.print(f"[dim]→ fan_out {names} :: {command}[/dim]")
             execs = fan_out(target_servers, command)
@@ -207,6 +225,13 @@ def _execute_plan(
             results.append(_serialize_result(r))
             if r.exit_code != 0 and r.error:
                 n_failed += 1
+            _emit(
+                on_event, "step_result",
+                step=idx, server=r.server, exit_code=r.exit_code,
+                stdout_preview=(r.stdout or "")[:400],
+                stderr_preview=(r.stderr or "")[:200],
+                error=r.error,
+            )
 
     return results, n_blocked, n_failed
 
@@ -219,8 +244,12 @@ def ask(
     console: Console,
     backend: LLMBackend,
     dry_run: bool = False,
+    on_event: EventCallback | None = None,
 ) -> AskOutcome:
+    """on_event 가 주어지면 phase 별 진행 이벤트를 푸시 (web SSE 등에서 활용)."""
     inventory = {s.name: s for s in targets}
+
+    _emit(on_event, "started", backend=backend.name, dry_run=dry_run, servers=[s.name for s in targets])
 
     plan_prompt = PLAN_INSTRUCTION.format(
         n_servers=len(targets),
@@ -228,31 +257,36 @@ def ask(
         prompt=prompt,
     )
     console.print(f"[dim]ask via {backend.name} CLI — planning…[/dim]")
+    _emit(on_event, "plan_start")
     plan_text = backend.invoke(plan_prompt)
     steps = _parse_plan(plan_text)
+    _emit(on_event, "plan_done", n_steps=len(steps), steps=steps)
 
     if not steps:
         console.print("[dim](no SSH commands proposed — summarizing directly)[/dim]")
 
     if dry_run:
-        # dry-run: plan 까지만 보고하고 LLM summarize 도 건너뜀 (비용 절감)
         results, n_blocked, n_failed = _execute_plan(
             steps, inventory=inventory, settings=settings, prompt=prompt,
-            console=console, dry_run=True,
+            console=console, dry_run=True, on_event=on_event,
         )
         plan_summary = "\n".join(
             f"- {s.get('servers', [s.get('server')])} :: {s.get('command')}" for s in steps
         ) or "(plan empty)"
-        return AskOutcome(
+        outcome = AskOutcome(
             final_text=f"[DRY-RUN] 실행하지 않았습니다. 제안된 plan:\n{plan_summary}",
             backend_name=backend.name,
             n_steps=len(steps),
             n_blocked=n_blocked,
             n_failed=n_failed,
         )
+        _emit(on_event, "done", final_text=outcome.final_text, n_steps=outcome.n_steps,
+              n_blocked=outcome.n_blocked, n_failed=outcome.n_failed)
+        return outcome
 
     results, n_blocked, n_failed = _execute_plan(
-        steps, inventory=inventory, settings=settings, prompt=prompt, console=console,
+        steps, inventory=inventory, settings=settings, prompt=prompt,
+        console=console, on_event=on_event,
     )
 
     summary_prompt = SUMMARIZE_INSTRUCTION.format(
@@ -260,12 +294,17 @@ def ask(
         results=json.dumps(results, ensure_ascii=False, indent=2),
     )
     console.print(f"[dim]summarizing via {backend.name} CLI…[/dim]")
+    _emit(on_event, "summarize_start")
     final_text = backend.invoke(summary_prompt).strip()
+    _emit(on_event, "summarize_done")
 
-    return AskOutcome(
+    outcome = AskOutcome(
         final_text=final_text,
         backend_name=backend.name,
         n_steps=len(steps),
         n_blocked=n_blocked,
         n_failed=n_failed,
     )
+    _emit(on_event, "done", final_text=outcome.final_text, n_steps=outcome.n_steps,
+          n_blocked=outcome.n_blocked, n_failed=outcome.n_failed)
+    return outcome

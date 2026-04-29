@@ -100,7 +100,7 @@ ruff check .
 - [x] Phase 2-b: `ask` 모드 (claude/gemini/codex CLI Plan→Execute→Summarize)
 - [x] Phase 2-c-1: web UI ask 실행 폼 (localhost-only, POST 폼)
 - [x] Phase 2-c-2: 권한 모드 allowlist + `--dry-run` 옵션
-- [ ] Phase 2-c-3: web UI 실시간 스트리밍 (현재는 동기 응답)
+- [x] Phase 2-c-3: web UI 실시간 스트리밍 (SSE 단계별 진행 표시)
 - [ ] Phase 3: Windows/macOS 호환 검증, role 별 개별 권한 검사 옵션
 
 ## 라이선스

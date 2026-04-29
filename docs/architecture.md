@@ -41,10 +41,16 @@
 ### web 모드 (구현됨)
 - `clopsctl web` → 127.0.0.1:8765 바인드 FastAPI (외부 노출 금지, 페이지에 경고 배너)
 - `GET /` — 인벤토리, 히스토리 20건, ask 폼 (서버 체크박스 + 프롬프트 + 백엔드 선택 + dry-run)
-- `POST /ask` — `agent.ask()` 호출 후 결과 HTML 페이지 렌더 (현재는 동기 응답)
+- `POST /ask` — `Job` 생성 + 백그라운드 thread 로 `agent.ask()` 시작, **즉시 streaming 페이지 반환**
+  - 페이지에 `EventSource('/ask/stream/<job_id>')` 임베드 → 브라우저가 단계별 이벤트 수신
+- `GET /ask/stream/{job_id}` — **SSE 스트림** (`text/event-stream`, keep-alive 코멘트 포함)
+  - 이벤트 타입: `started` / `plan_start` / `plan_done` / `step_start` / `step_result` / `step_blocked` / `step_failed` / `step_dry_run` / `summarize_start` / `summarize_done` / `done` / `error`
+  - 종료: `event: eof` 후 `data: end`
 - `GET /healthz` — 버전/백엔드 가용성 JSON
-- 모든 동적 값은 `html.escape()` 처리 (XSS 방지, 단위 테스트로 검증)
-- 후속(Phase 2-c-3): WebSocket/SSE 스트리밍, 진행 표시기
+- 모든 동적 값은 서버측 `html.escape()` + 클라이언트측 `escapeHtml()` 두 단계 escape (XSS 방지)
+- Job 은 in-memory dict 로 관리, 종료 후 10분 TTL 로 자동 청소 (단일 프로세스 가정)
+
+`agent.ask()` 는 옵셔널 `on_event` 콜백을 받아 phase 별 dict 이벤트를 푸시 — CLI는 `console.print`, web은 SSE 큐 push 로 동일 콜백 인터페이스 활용.
 
 ## 디자인 결정
 

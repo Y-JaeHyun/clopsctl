@@ -132,35 +132,50 @@ def exec_cmd(
 def ask_cmd(
     targets: str = typer.Argument(..., help="콤마로 구분된 서버 이름들"),
     prompt: str = typer.Argument(..., help="자연어 프롬프트"),
+    backend_name: str | None = typer.Option(
+        None, "--backend", "-b",
+        help="LLM 백엔드 (claude|gemini|codex). 미지정 시 환경변수 또는 PATH 자동 감지",
+    ),
 ) -> None:
-    """LLM 경유 자연어 명령 (Anthropic SDK + tool_use 루프)."""
-    from . import agent  # 지연 import — anthropic 미설치 환경에서도 다른 명령은 동작
+    """LLM 경유 자연어 명령 — 로컬 claude/gemini/codex CLI 활용."""
+    from . import agent
+    from . import llm
 
     settings = load_settings()
-    if not settings.anthropic_api_key:
-        err_console.print(
-            "[red]ANTHROPIC_API_KEY 가 .env 에 설정되어 있지 않습니다.[/red]\n"
-            "cp .env.example .env && chmod 600 .env  # 그 후 키 입력"
-        )
-        raise typer.Exit(code=2)
+    try:
+        backend = llm.select_backend(backend_name or settings.llm_backend)
+    except RuntimeError as exc:
+        err_console.print(f"[red]LLM 백엔드 사용 불가:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
     selected = _resolve_servers(targets)
-    console.print(
-        f"[dim]ask: {len(selected)} server(s) → {settings.model}[/dim]"
-    )
+    console.print(f"[dim]ask: {len(selected)} server(s) via {backend.name} CLI[/dim]")
     try:
-        outcome = agent.ask(prompt, selected, settings=settings, console=console)
+        outcome = agent.ask(prompt, selected, settings=settings, console=console, backend=backend)
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"ask 실패: {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print()
-    console.print(Panel(outcome.final_text, title="answer", border_style="cyan"))
+    console.print(Panel(outcome.final_text, title=f"answer ({outcome.backend_name})", border_style="cyan"))
     console.print(
-        f"[dim]iterations={outcome.iterations}  "
-        f"in={outcome.input_tokens}  out={outcome.output_tokens}  "
-        f"cache_read={outcome.cache_read_tokens}  cache_write={outcome.cache_creation_tokens}[/dim]"
+        f"[dim]steps={outcome.n_steps}  blocked={outcome.n_blocked}  failed={outcome.n_failed}[/dim]"
     )
+
+
+@app.command("backend")
+def backend_status() -> None:
+    """가용한 LLM CLI 백엔드 목록 표시."""
+    from . import llm
+    table = Table(title="LLM backends")
+    table.add_column("name", style="cyan")
+    table.add_column("binary")
+    table.add_column("available")
+    for name, available in llm.list_backends():
+        marker = "[green]✓[/green]" if available else "[red]✗[/red]"
+        binary = {"claude": "claude", "gemini": "gemini", "codex": "codex"}[name]
+        table.add_row(name, binary, marker)
+    console.print(table)
 
 
 @app.command("history")

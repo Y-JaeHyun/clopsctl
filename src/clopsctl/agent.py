@@ -1,190 +1,145 @@
-"""LLM 에이전트 — Anthropic SDK + tool_use 루프 + 우리 SSH 통합.
+"""LLM 에이전트 — 로컬 CLI 백엔드(claude/gemini/codex) 기반 Plan→Execute→Summarize.
 
-흐름:
-  1. 사용자: clopsctl ask web-1,web-2 "디스크 80% 초과 경로 찾아줘"
-  2. 시스템 프롬프트에 대상 서버 인벤토리(role/태그 포함) 주입
-  3. ssh_exec / ssh_fan_out 도구 노출
-  4. 도구 호출마다 safety regex 게이트 → paramiko 실행 → SQLite history append
-  5. stop_reason == 'end_turn' 까지 반복, 마지막 텍스트 + 사용 토큰 표시
+Anthropic SDK 같은 양방향 tool_use 루프 대신, CLI 백엔드가 모두 동등하게
+지원하는 단순 텍스트 in/out 모델을 사용:
+
+  1. Plan:    LLM 에 인벤토리 + 사용자 질문을 주고 실행할 SSH 명령(JSON) 생성
+  2. Execute: 우리가 safety 게이트 + paramiko fan-out 으로 실제 실행
+  3. Summarize: 실행 결과를 LLM 에 다시 보내 사용자 질문에 한국어 답변
+
+이 분리 덕에 모든 CLI 백엔드(claude/gemini/codex)가 동일하게 동작.
 """
 from __future__ import annotations
 
 import json
-import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
-import anthropic
 from rich.console import Console
 
 from .config import Server, Settings
 from .history import record
+from .llm import LLMBackend
 from .safety import is_dangerous
 from .ssh import ExecResult, fan_out, run
 
-MAX_ITERATIONS = 12  # 무한 루프 방지
+MAX_STEPS = 12  # 한 번의 ask 에서 실행할 최대 SSH step 수
 
-TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "ssh_exec",
-        "description": (
-            "Run a shell command on a single SSH server from the inventory. "
-            "Returns stdout, stderr, and exit_code. Use this for targeted, single-host work."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "server": {
-                    "type": "string",
-                    "description": "Server name as it appears in the inventory (e.g. 'web-1').",
-                },
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to execute on the remote host.",
-                },
-            },
-            "required": ["server", "command"],
-        },
-    },
-    {
-        "name": "ssh_fan_out",
-        "description": (
-            "Run the same shell command on multiple SSH servers in parallel. "
-            "Returns one result per server. Prefer this when you need to compare or aggregate "
-            "across hosts (e.g. 'check disk usage on all web nodes')."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "servers": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of server names from the inventory.",
-                },
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to execute on every selected host.",
-                },
-            },
-            "required": ["servers", "command"],
-        },
-    },
-]
+PLAN_INSTRUCTION = """당신은 clopsctl, SSH 운영 보조 에이전트입니다.
 
+인벤토리 ({n_servers}대):
+{inventory}
 
-def _system_prompt(servers: list[Server]) -> str:
-    inventory_lines = []
-    for s in servers:
-        tags = ", ".join(s.tags) if s.tags else "-"
-        inventory_lines.append(f"- {s.name} (host={s.host}, user={s.user}, role={s.role}, tags={tags})")
-    inventory = "\n".join(inventory_lines)
+사용자 요청: {prompt}
 
-    return (
-        "You are clopsctl, an SSH ops assistant. You operate on the user's behalf via two tools "
-        "(`ssh_exec`, `ssh_fan_out`) that run shell commands over SSH on pre-registered servers.\n\n"
-        "Rules:\n"
-        "1. Only use server names that appear in the inventory below.\n"
-        "2. Prefer read-only commands (df, free, ps, journalctl, ls, cat, grep) unless the user "
-        "explicitly asks for a state change.\n"
-        "3. Never run destructive commands (rm -rf /, shutdown, reboot, mkfs, dd to /dev/...). "
-        "The host-side safety gate will reject them and return is_error=true.\n"
-        "4. When fan-out makes sense (comparing/aggregating across hosts), use `ssh_fan_out` "
-        "in a single call rather than many sequential `ssh_exec` calls.\n"
-        "5. If a command fails, read the stderr and decide: try a different approach, or report the "
-        "limitation. Do not loop on the same failing command.\n"
-        "6. Final answer: respond in Korean. Summarize findings concisely. Reference servers by "
-        "their inventory name. If numeric data is involved, present it as a small table.\n\n"
-        f"Inventory ({len(servers)} server{'s' if len(servers) != 1 else ''}):\n{inventory}\n"
-    )
+요청에 답하기 위해 어떤 SSH 명령을 어느 서버에서 실행해야 하는지 결정하세요.
+
+규칙:
+1. 인벤토리에 없는 서버 이름은 사용하지 않습니다.
+2. 읽기 전용 명령을 우선합니다 (df, free, ps, journalctl, ls, cat, grep, uptime 등).
+3. 위험 명령(rm -rf /, shutdown, reboot, mkfs, dd ... of=/dev/...) 금지.
+4. 같은 명령을 여러 서버에 보내야 하면 servers 배열로 한 번에(fan-out) 표현.
+5. 명령 실행 없이 답변 가능하면 빈 배열로 답하세요.
+
+다음 JSON 한 개만 출력하세요. 코드 블록(```)도 금지. 다른 어떤 설명/머리말/꼬리말도 금지:
+
+{{"steps": [
+  {{"server": "web-1", "command": "df -h"}},
+  {{"servers": ["web-1", "web-2"], "command": "uptime"}}
+]}}
+"""
+
+SUMMARIZE_INSTRUCTION = """당신은 clopsctl 입니다. 다음 SSH 실행 결과를 바탕으로 사용자 질문에 한국어로 간결하게 답하세요.
+
+사용자 질문: {prompt}
+
+실행 결과 (JSON):
+{results}
+
+답변 규칙:
+- 한국어, 간결하게.
+- 서버는 인벤토리 이름으로 지칭.
+- 수치 비교가 필요하면 작은 표를 사용.
+- 결과가 비어있거나 에러뿐이면 어떤 한계가 있었는지 정직하게 보고.
+"""
 
 
 @dataclass(slots=True)
 class AskOutcome:
     final_text: str
-    iterations: int
-    input_tokens: int
-    output_tokens: int
-    cache_read_tokens: int
-    cache_creation_tokens: int
+    backend_name: str
+    n_steps: int
+    n_blocked: int
+    n_failed: int
 
 
-def _format_exec_result(r: ExecResult) -> str:
-    if r.error:
-        return json.dumps(
-            {"server": r.server, "host": r.host, "error": r.error, "exit_code": r.exit_code},
-            ensure_ascii=False,
-        )
-    return json.dumps(
-        {
-            "server": r.server,
-            "host": r.host,
-            "exit_code": r.exit_code,
-            "stdout": r.stdout[-4000:],  # 큰 출력 절단 (LLM 컨텍스트 보호)
-            "stderr": r.stderr[-2000:],
-        },
-        ensure_ascii=False,
-    )
+def _format_inventory(servers: list[Server]) -> str:
+    lines = []
+    for s in servers:
+        tags = ", ".join(s.tags) if s.tags else "-"
+        lines.append(f"- {s.name} (host={s.host}, user={s.user}, role={s.role}, tags={tags})")
+    return "\n".join(lines)
 
 
-def _execute_tool(
-    tool_name: str,
-    tool_input: dict[str, Any],
+_JSON_BLOCK = re.compile(r"\{[\s\S]*\}")
+
+
+def _parse_plan(text: str) -> list[dict[str, Any]]:
+    """LLM 응답에서 JSON 추출. 코드 펜스/주변 설명 허용."""
+    cleaned = text.strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        m = _JSON_BLOCK.search(cleaned)
+        if not m:
+            raise RuntimeError(f"LLM did not return parseable JSON. raw: {cleaned[:300]}")
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"LLM JSON malformed: {exc}. raw: {cleaned[:300]}") from exc
+
+    steps = data.get("steps", [])
+    if not isinstance(steps, list):
+        raise RuntimeError(f"plan.steps is not a list: {type(steps).__name__}")
+    return steps[:MAX_STEPS]
+
+
+def _serialize_result(r: ExecResult) -> dict[str, Any]:
+    return {
+        "server": r.server,
+        "host": r.host,
+        "exit_code": r.exit_code,
+        "stdout": (r.stdout or "")[-3000:],
+        "stderr": (r.stderr or "")[-1000:],
+        "error": r.error,
+    }
+
+
+def _execute_plan(
+    steps: list[dict[str, Any]],
     *,
     inventory: dict[str, Server],
     settings: Settings,
     prompt: str,
-) -> tuple[str, bool]:
-    """도구 호출 1건 실행. (tool_result_content, is_error) 반환."""
+    console: Console,
+) -> tuple[list[dict[str, Any]], int, int]:
+    results: list[dict[str, Any]] = []
+    n_blocked = 0
+    n_failed = 0
 
-    def _resolve(name: str) -> Server | None:
-        return inventory.get(name)
-
-    if tool_name == "ssh_exec":
-        server_name = tool_input.get("server", "")
-        command = tool_input.get("command", "")
-        srv = _resolve(server_name)
-        if srv is None:
-            return f"unknown server '{server_name}' (not in inventory)", True
-
-        flagged = is_dangerous(command)
-        if flagged:
-            record(
-                settings.history_db,
-                server=srv.name,
-                mode="ask",
-                command=command,
-                prompt=prompt,
-                exit_code=None,
-                stderr=f"safety gate blocked: {flagged}",
-            )
-            return f"blocked by safety gate (pattern: {flagged}). Try a non-destructive alternative.", True
-
-        result = run(srv, command)
-        record(
-            settings.history_db,
-            server=srv.name,
-            mode="ask",
-            command=command,
-            prompt=prompt,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr or (result.error or ""),
-            llm_model=settings.model,
-        )
-        return _format_exec_result(result), result.exit_code != 0 and bool(result.error)
-
-    if tool_name == "ssh_fan_out":
-        names: list[str] = tool_input.get("servers", []) or []
-        command = tool_input.get("command", "")
-        unknown = [n for n in names if n not in inventory]
-        if unknown:
-            return f"unknown servers: {', '.join(unknown)}", True
-        if not names:
-            return "servers list is empty", True
+    for step in steps:
+        command = (step.get("command") or "").strip()
+        if not command:
+            results.append({"server": "?", "error": "empty command in plan", "skipped": True})
+            continue
 
         flagged = is_dangerous(command)
         if flagged:
-            for n in names:
+            n_blocked += 1
+            console.print(f"[yellow]✗ blocked[/yellow] {command!r} (pattern: {flagged})")
+            target_names = step.get("servers") or ([step["server"]] if step.get("server") else [])
+            for n in target_names:
                 record(
                     settings.history_db,
                     server=n,
@@ -194,27 +149,48 @@ def _execute_tool(
                     exit_code=None,
                     stderr=f"safety gate blocked: {flagged}",
                 )
-            return f"blocked by safety gate (pattern: {flagged}). Try a non-destructive alternative.", True
+                results.append(
+                    {"server": n, "blocked": True, "pattern": flagged, "command": command}
+                )
+            continue
 
-        targets = [inventory[n] for n in names]
-        results = fan_out(targets, command)
-        for r in results:
+        if "servers" in step:
+            names = step["servers"] or []
+            unknown = [n for n in names if n not in inventory]
+            if unknown:
+                results.append({"error": f"unknown servers: {unknown}", "command": command})
+                n_failed += 1
+                continue
+            console.print(f"[dim]→ fan_out {names} :: {command}[/dim]")
+            for r in fan_out([inventory[n] for n in names], command):
+                record(
+                    settings.history_db,
+                    server=r.server, mode="ask", command=command, prompt=prompt,
+                    exit_code=r.exit_code, stdout=r.stdout, stderr=r.stderr or (r.error or ""),
+                    llm_model=settings.model,
+                )
+                results.append(_serialize_result(r))
+                if r.exit_code != 0 and r.error:
+                    n_failed += 1
+        else:
+            name = step.get("server")
+            if not name or name not in inventory:
+                results.append({"error": f"unknown server: {name}", "command": command})
+                n_failed += 1
+                continue
+            console.print(f"[dim]→ exec {name} :: {command}[/dim]")
+            r = run(inventory[name], command)
             record(
                 settings.history_db,
-                server=r.server,
-                mode="ask",
-                command=command,
-                prompt=prompt,
-                exit_code=r.exit_code,
-                stdout=r.stdout,
-                stderr=r.stderr or (r.error or ""),
+                server=r.server, mode="ask", command=command, prompt=prompt,
+                exit_code=r.exit_code, stdout=r.stdout, stderr=r.stderr or (r.error or ""),
                 llm_model=settings.model,
             )
-        payload = json.dumps([json.loads(_format_exec_result(r)) for r in results], ensure_ascii=False)
-        any_error = any(r.exit_code != 0 and bool(r.error) for r in results)
-        return payload, any_error
+            results.append(_serialize_result(r))
+            if r.exit_code != 0 and r.error:
+                n_failed += 1
 
-    return f"unknown tool: {tool_name}", True
+    return results, n_blocked, n_failed
 
 
 def ask(
@@ -223,89 +199,37 @@ def ask(
     *,
     settings: Settings,
     console: Console,
-    client: anthropic.Anthropic | None = None,
+    backend: LLMBackend,
 ) -> AskOutcome:
-    if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
-
     inventory = {s.name: s for s in targets}
-    client = client or anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-    system_prompt = _system_prompt(targets)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    plan_prompt = PLAN_INSTRUCTION.format(
+        n_servers=len(targets),
+        inventory=_format_inventory(targets),
+        prompt=prompt,
+    )
+    console.print(f"[dim]ask via {backend.name} CLI — planning…[/dim]")
+    plan_text = backend.invoke(plan_prompt)
+    steps = _parse_plan(plan_text)
 
-    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
-    final_text = ""
-    iteration = 0
+    if not steps:
+        console.print("[dim](no SSH commands proposed — summarizing directly)[/dim]")
 
-    for iteration in range(1, MAX_ITERATIONS + 1):
-        response = client.messages.create(
-            model=settings.model,
-            max_tokens=8192,
-            thinking={"type": "adaptive"},
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=TOOLS,
-            messages=messages,
-        )
+    results, n_blocked, n_failed = _execute_plan(
+        steps, inventory=inventory, settings=settings, prompt=prompt, console=console
+    )
 
-        usage = response.usage
-        totals["input"] += getattr(usage, "input_tokens", 0) or 0
-        totals["output"] += getattr(usage, "output_tokens", 0) or 0
-        totals["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
-        totals["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
-
-        # 어시스턴트 응답을 history에 그대로 append
-        messages.append({"role": "assistant", "content": response.content})
-
-        if response.stop_reason == "end_turn":
-            for block in response.content:
-                if block.type == "text":
-                    final_text += block.text
-            break
-
-        if response.stop_reason == "tool_use":
-            tool_results: list[dict[str, Any]] = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    console.print(f"[dim]→ {block.name}({json.dumps(block.input, ensure_ascii=False)[:120]})[/dim]")
-                    content, is_error = _execute_tool(
-                        block.name,
-                        block.input,
-                        inventory=inventory,
-                        settings=settings,
-                        prompt=prompt,
-                    )
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": content,
-                            "is_error": is_error,
-                        }
-                    )
-            messages.append({"role": "user", "content": tool_results})
-            continue
-
-        # max_tokens / refusal / 그 외 → 루프 종료
-        for block in response.content:
-            if block.type == "text":
-                final_text += block.text
-        break
-
-    if not final_text:
-        final_text = f"(LLM did not return final text — stop_reason={response.stop_reason})"
+    summary_prompt = SUMMARIZE_INSTRUCTION.format(
+        prompt=prompt,
+        results=json.dumps(results, ensure_ascii=False, indent=2),
+    )
+    console.print(f"[dim]summarizing via {backend.name} CLI…[/dim]")
+    final_text = backend.invoke(summary_prompt).strip()
 
     return AskOutcome(
-        final_text=final_text.strip(),
-        iterations=iteration,
-        input_tokens=totals["input"],
-        output_tokens=totals["output"],
-        cache_read_tokens=totals["cache_read"],
-        cache_creation_tokens=totals["cache_creation"],
+        final_text=final_text,
+        backend_name=backend.name,
+        n_steps=len(steps),
+        n_blocked=n_blocked,
+        n_failed=n_failed,
     )

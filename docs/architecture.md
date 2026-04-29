@@ -6,18 +6,20 @@
 
 ```
 [로컬 마스터]
-├─ Claude Code CLI (claude-opus-4-7)            ← 자연어 명령 진입점
-├─ MCP server: mcp-ssh-manager (npm 글로벌)     ← LLM ↔ SSH 다리
+├─ LLM CLI (claude / gemini / codex 중 하나)   ← 사용자 환경에서 이미 인증됨
 └─ clopsctl (이 repo)
+   ├─ llm        백엔드 추상 (subprocess 로 위 CLI 호출)
    ├─ inventory  servers.toml
    ├─ secrets    .env, *.pem  (gitignore, chmod 600)
    ├─ history    SQLite (append-only)
-   ├─ CLI        Typer  — server / exec / ask / history / web
+   ├─ CLI        Typer  — server / exec / ask / backend / history / web
    └─ Web UI     FastAPI — 인벤토리/히스토리 read-only (Phase 2 1차)
 
 [원격 서버 N대]
 └─ sshd 만 가동, AI 미설치
 ```
+
+> ANTHROPIC_API_KEY 같은 키를 직접 관리하지 않습니다. 사용자 머신에 이미 인증돼 있는 `claude`/`gemini`/`codex` CLI 를 그대로 활용 — 인증·요금·모델 정책은 각 CLI 의 책임.
 
 ## 주요 흐름
 
@@ -27,11 +29,14 @@
 3. `ssh.fan_out` 으로 paramiko 병렬 실행
 4. 결과를 콘솔 panel + history SQLite 에 기록
 
-### ask 모드 (LLM 경유, Phase 2)
+### ask 모드 (LLM CLI Plan→Execute→Summarize)
 1. 사용자: `clopsctl ask web-1,web-2 "디스크 80% 초과 경로 찾아줘"`
-2. wrapper 가 `claude code` 세션을 실행 (mcp-ssh-manager 활성)
-3. LLM 이 mcp-ssh-manager 도구로 N대 서버에 질의 fan-out
-4. LLM 응답 + 실제 실행 명령/결과를 history 에 기록
+2. **Plan**: 인벤토리 + 사용자 질문을 LLM CLI(stdin)로 전달, JSON `{"steps": [...]}` 응답 받음
+3. **Execute**: 우리가 safety 게이트 통과시키고 paramiko 로 실행 (단일/fan-out 모두)
+4. **Summarize**: 실행 결과를 다시 LLM CLI에 보내 한국어 답변 생성
+5. 자연어 프롬프트 + 실제 실행 명령/결과 모두 history(`mode='ask'`) append-only 기록
+
+> 단순 텍스트 in/out 만 쓰므로 claude, gemini, codex 어느 CLI 라도 동등하게 동작.
 
 ### web 모드 (Phase 2)
 - `clopsctl web` → 로컬 127.0.0.1 바인드 FastAPI

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clopsctl"
-version = "0.0.1"
-description = "Master-side SSH fleet controller for natural-language ops via Claude"
+version = "0.0.2"
+description = "Master-side SSH fleet controller via local LLM CLI (claude/gemini/codex)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -19,7 +19,6 @@ dependencies = [
     "tomli>=2.0;python_version<'3.11'",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
-    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

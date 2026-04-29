@@ -39,7 +39,7 @@ class Settings:
     safety_confirm: bool
     web_host: str
     web_port: int
-    anthropic_api_key: str | None
+    llm_backend: str | None  # "claude" | "gemini" | "codex" | None(자동 감지)
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -54,7 +54,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         safety_confirm=os.getenv("CLOPSCTL_SAFETY_CONFIRM", "true").lower() == "true",
         web_host=os.getenv("CLOPSCTL_WEB_HOST", "127.0.0.1"),
         web_port=int(os.getenv("CLOPSCTL_WEB_PORT", "8765")),
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+        llm_backend=os.getenv("CLOPSCTL_LLM_BACKEND"),
     )
 
 

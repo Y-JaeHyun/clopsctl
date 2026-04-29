@@ -5,41 +5,52 @@
 - **언어**: Python 3.11+
 - **CLI**: Typer / Rich
 - **SSH**: paramiko (병렬 fan-out)
-- **LLM**: Anthropic Claude (`claude-opus-4-7`) + `mcp-ssh-manager` (Node MCP 서버)
-- **Web**: FastAPI (Phase 2)
+- **LLM**: 로컬에 설치된 `claude` / `gemini` / `codex` CLI 를 subprocess 로 호출 — API key 직접 관리 불필요
+- **Web**: FastAPI (Phase 2 read-only stub)
 - **히스토리**: SQLite append-only
-- **상태**: 0.0.1 — 스캐폴드 + `exec` 모드 동작, `ask`/`web` 은 Phase 2
+- **상태**: 0.0.2 — `exec` + `ask`(Plan→Execute→Summarize) 동작, web UI 폼은 Phase 2-c
 
 ## 빠른 시작
 
-### 1. 의존성
+### 1. 사전 요건
+
+마스터 머신에 다음 중 **하나 이상**의 LLM CLI 가 설치·인증되어 있어야 합니다:
 
 ```bash
-# Python 패키지
+which claude   # https://docs.claude.com/code (권장)
+which gemini   # https://github.com/google-gemini/gemini-cli
+which codex    # https://github.com/openai/codex
+```
+
+`clopsctl backend` 로 가용성 확인 가능. 미설치 백엔드는 자동으로 건너뜀.
+
+### 2. 의존성
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-
-# Node MCP 서버 (ask 모드용, 마스터 전역 1회)
-npm i -g mcp-ssh-manager
 ```
 
-### 2. 설정
+### 3. 설정
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-# .env 안에서 ANTHROPIC_API_KEY 등 채우기
+# .env 에서 CLOPSCTL_LLM_BACKEND 등 환경 조정 (기본은 PATH 자동 감지)
 
 cp inventory/servers.example.toml inventory/servers.toml
 # 실서버 정보 입력. pem 은 secrets/ 또는 안전한 경로에
 chmod 700 secrets 2>/dev/null || true
 ```
 
-### 3. 사용
+### 4. 사용
 
 ```bash
-# 인벤토리 확인
+# 가용한 LLM 백엔드 확인
+clopsctl backend
+
+# 인벤토리
 clopsctl server list
 clopsctl server check web-1
 
@@ -47,15 +58,16 @@ clopsctl server check web-1
 clopsctl exec web-1 -- "df -h"
 clopsctl exec web-1,web-2,db-stage -- "uptime"
 
-# 자연어 (Phase 2 — 현재 stub)
+# 자연어 (LLM CLI 활용 — Plan→Execute→Summarize)
 clopsctl ask web-1,web-2 "최근 1시간 5xx 비율 알려줘"
+clopsctl ask --backend gemini web-1 "디스크 80% 넘는 마운트 찾아줘"
 
-# 히스토리
+# 히스토리 (자연어 프롬프트와 실제 실행 명령 모두 기록됨)
 clopsctl history --limit 30
 clopsctl history --server web-1
 clopsctl history --grep "디스크"
 
-# 웹 UI (Phase 2 1차 — 인벤토리/히스토리 read-only)
+# 웹 UI (Phase 2 read-only stub)
 clopsctl web
 # → http://127.0.0.1:8765
 ```
@@ -81,11 +93,11 @@ ruff check .
 
 ## 로드맵
 
-- [x] Phase 1 PoC: 마스터 환경 검증, mcp-ssh-manager 호환성
+- [x] Phase 1 PoC: 마스터 환경 검증, LLM CLI 가용성
 - [x] Phase 2-a: 스캐폴드 + `exec` fan-out + history + web stub
-- [ ] Phase 2-b: `ask` 모드 (Claude Code + mcp-ssh-manager subprocess 통합)
+- [x] Phase 2-b: `ask` 모드 (claude/gemini/codex CLI Plan→Execute→Summarize)
 - [ ] Phase 2-c: web UI 실행 폼/스트리밍
-- [ ] Phase 3: Windows/macOS 호환 검증, 권한 모드 분리, allowlist 정책
+- [ ] Phase 3: Windows/macOS 호환 검증, 권한 모드 분리, allowlist 정책, ask confirm gate
 
 ## 라이선스
 

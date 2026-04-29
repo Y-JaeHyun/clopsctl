@@ -145,7 +145,10 @@ def test_ask_post_happy_path_streams_events(client, monkeypatch):
         data={"prompt": "현황 보고", "targets": ["web-1", "web-2"], "backend": "claude"},
     )
     assert resp.status_code == 200
-    assert "Ask 진행 중" in resp.text
+    # 새 마크업: 답변/로그 영역 + 백엔드 표시
+    assert "id='answer'" in resp.text
+    assert "id='log'" in resp.text
+    assert "현황 보고" in resp.text
     # 페이지 안에 EventSource 가 있고 job_id 가 임베드됨
     assert "EventSource('/ask/stream/" in resp.text
 

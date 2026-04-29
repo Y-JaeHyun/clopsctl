@@ -104,7 +104,7 @@ def test_safety_blocks_dangerous_command(monkeypatch, settings, server, console)
 def test_fan_out_step_records_per_server(monkeypatch, settings, server, server2, console):
     monkeypatch.setattr(
         agent, "fan_out",
-        lambda srvs, cmd: [ExecResult(s.name, s.host, 0, f"up on {s.name}\n", "") for s in srvs],
+        lambda srvs, cmd, **kw: [ExecResult(s.name, s.host, 0, f"up on {s.name}\n", "") for s in srvs],
     )
     backend = FakeBackend(responses=[
         json.dumps({"steps": [{"servers": ["web-1", "web-2"], "command": "uptime"}]}),

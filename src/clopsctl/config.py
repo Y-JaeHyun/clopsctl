@@ -29,6 +29,7 @@ class Server:
     password_env: str | None = None
     role: RoleMode = "read-only"
     tags: tuple[str, ...] = field(default_factory=tuple)
+    jump: str | None = None  # 다른 server name 참조 (bastion). 최대 1단계 chain (총 2 hop)
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,5 +78,6 @@ def load_inventory(path: Path) -> dict[str, Server]:
             password_env=cfg.get("password_env"),
             role=cfg.get("role", "read-only"),
             tags=tuple(cfg.get("tags", [])),
+            jump=cfg.get("jump"),
         )
     return servers

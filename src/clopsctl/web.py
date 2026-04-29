@@ -56,28 +56,106 @@ def _e(s: object) -> str:
 
 
 _PAGE_CSS = """
-body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; max-width: 980px; line-height: 1.4; }
-h1 { margin: 0 0 .25rem 0; }
-h2 { margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: .25rem; }
-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #eee; vertical-align: top; }
-th { background: #fafafa; }
-code, pre { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-pre { padding: .75rem 1rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-.muted { color: #777; }
-form fieldset { border: 1px solid #ddd; padding: 1rem 1.25rem; border-radius: 4px; }
-form legend { font-weight: 600; padding: 0 .5rem; }
-form label { display: inline-block; margin-right: 1rem; }
-form textarea { width: 100%; min-height: 4rem; font-family: inherit; padding: .5rem; box-sizing: border-box; }
-form .row { margin: .75rem 0; }
-form button { padding: .5rem 1rem; background: #0066cc; color: white; border: 0; border-radius: 4px; cursor: pointer; font-size: 1rem; }
-form button:hover { background: #0052a3; }
-.panel { border: 1px solid #ddd; border-radius: 4px; padding: 1rem 1.25rem; margin: .75rem 0; }
-.panel.ok { border-left: 4px solid #22aa55; }
-.panel.warn { border-left: 4px solid #cc8800; }
-.panel.err { border-left: 4px solid #cc4444; }
-.kv { font-size: .85rem; color: #555; }
-.banner { background: #fff8e0; border: 1px solid #f0d878; padding: .5rem .75rem; border-radius: 4px; font-size: .85rem; }
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --border: #e3e6ec;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --code-bg: #f3f4f6;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--text); }
+body {
+  font-family: -apple-system, "Segoe UI", system-ui, "Helvetica Neue", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  margin: 0; line-height: 1.5; font-size: 14px;
+}
+.topbar {
+  background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
+  color: #e2e8f0; padding: .85rem 1.5rem; display: flex; align-items: center; gap: .75rem;
+  border-bottom: 1px solid #0b1220;
+}
+.topbar .brand { font-weight: 600; font-size: 1.05rem; letter-spacing: -.01em; }
+.topbar .brand .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: .5rem; vertical-align: middle; }
+.topbar .ver { color: #94a3b8; font-size: .8rem; }
+.topbar .nav { margin-left: auto; }
+.topbar .nav a { color: #cbd5e1; text-decoration: none; padding: .25rem .6rem; border-radius: 4px; font-size: .85rem; }
+.topbar .nav a:hover { background: rgba(255,255,255,.06); color: white; }
+.container { max-width: 1080px; margin: 1.25rem auto; padding: 0 1.25rem 3rem; }
+.banner {
+  background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+  padding: .65rem .9rem; border-radius: 6px; font-size: .85rem; margin-bottom: 1.25rem;
+}
+h1 { margin: 0; }
+h2 { margin: 0 0 .8rem 0; font-size: 1.1rem; font-weight: 600; letter-spacing: -.01em; }
+h3 { margin: 0 0 .4rem 0; font-size: .9rem; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 1.1rem 1.25rem; margin-bottom: 1.25rem; box-shadow: 0 1px 2px rgba(15,23,42,.04);
+}
+.card.tight { padding: .75rem .9rem; }
+table { width: 100%; border-collapse: collapse; }
+table th, table td { text-align: left; padding: .5rem .65rem; border-bottom: 1px solid var(--border); font-size: .85rem; }
+table th { background: #f9fafb; font-weight: 600; color: #374151; }
+table tr:last-child td { border-bottom: 0; }
+table.dense th, table.dense td { padding: .35rem .55rem; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .82em; }
+code { background: var(--code-bg); padding: .1rem .35rem; border-radius: 3px; }
+pre { background: var(--code-bg); padding: .75rem 1rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
+.muted { color: var(--muted); }
+.kv { font-size: .82rem; color: var(--muted); margin-bottom: .75rem; }
+.kv b { color: var(--text); }
+.badge {
+  display: inline-block; padding: .12rem .5rem; border-radius: 999px; font-size: .72rem;
+  font-weight: 600; line-height: 1.5; vertical-align: middle;
+}
+.badge.role-read-only { background: #ecfeff; color: #0e7490; }
+.badge.role-shell { background: #fef3c7; color: #92400e; }
+.badge.role-sudo { background: #fee2e2; color: #b91c1c; }
+.badge.tag { background: #eef2ff; color: #4338ca; margin-left: .25rem; }
+.badge.jump { background: #f5f3ff; color: #6d28d9; }
+form fieldset { border: 0; padding: 0; margin: 0; }
+form legend { display: none; }
+form .row { margin: .9rem 0; }
+form .label-block { font-weight: 600; font-size: .85rem; margin-bottom: .35rem; display: block; color: #374151; }
+form textarea, form input[type='text'], form input[type='number'], form select {
+  width: 100%; padding: .55rem .7rem; font-family: inherit; font-size: .9rem;
+  border: 1px solid var(--border); border-radius: 6px; background: white; color: var(--text);
+}
+form textarea { min-height: 5.5rem; resize: vertical; }
+form textarea:focus, form input:focus, form select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+form .checkbox-group { display: flex; flex-wrap: wrap; gap: .4rem .5rem; }
+form .checkbox-group label {
+  display: inline-flex; align-items: center; gap: .35rem; padding: .3rem .65rem;
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: #f9fafb; font-size: .85rem;
+}
+form .checkbox-group label:hover { background: #f3f4f6; }
+form .checkbox-group input { accent-color: var(--accent); }
+form .row-inline { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+form .row-inline > div { flex: 1; min-width: 180px; }
+form button {
+  padding: .6rem 1.25rem; background: var(--accent); color: white; border: 0; border-radius: 6px;
+  cursor: pointer; font-size: .95rem; font-weight: 600; letter-spacing: -.005em;
+}
+form button:hover { background: var(--accent-hover); }
+form button.secondary { background: #6b7280; }
+.panel { border: 1px solid var(--border); border-radius: 6px; padding: .85rem 1rem; margin: .5rem 0; background: #fafbfc; }
+.panel.ok { border-left: 3px solid var(--ok); background: #f0fdf4; }
+.panel.warn { border-left: 3px solid var(--warn); background: #fffbeb; }
+.panel.err { border-left: 3px solid var(--err); background: #fef2f2; }
+.event-row { padding: .35rem .5rem; border-bottom: 1px dashed #e5e7eb; font-size: .82rem; font-family: ui-monospace, monospace; }
+.event-row:last-child { border-bottom: 0; }
+.event-row.evt-blocked { color: var(--warn); }
+.event-row.evt-failed { color: var(--err); }
+.event-row.evt-ok { color: var(--ok); }
+.event-row .icon { display: inline-block; width: 1.2em; }
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
 """
 
 
@@ -88,59 +166,99 @@ def _layout(title: str, body: str) -> str:
   <title>{_e(title)}</title>
   <style>{_PAGE_CSS}</style>
 </head><body>
-  <h1>clopsctl <span class='muted'>{_e(__version__)}</span></h1>
-  <p class='muted'>Master-side SSH fleet controller. <a href='/'>home</a></p>
-  <p class='banner'>⚠ 이 UI 는 SSH 명령을 실행합니다. 반드시 localhost (127.0.0.1) bind 인지 확인하세요.</p>
-  {body}
+  <header class='topbar'>
+    <span class='brand'><span class='dot'></span>clopsctl <span class='ver'>v{_e(__version__)}</span></span>
+    <nav class='nav'>
+      <a href='/'>Home</a>
+      <a href='/healthz'>Health</a>
+    </nav>
+  </header>
+  <main class='container'>
+    <p class='banner'>⚠ 이 UI 는 인증 없이 SSH 명령을 실행합니다. 반드시 신뢰된 네트워크 (기본 127.0.0.1) 에서만 사용하세요.</p>
+    {body}
+  </main>
 </body></html>"""
 
 
 def _server_rows_html(inventory: dict[str, Server]) -> str:
     if not inventory:
-        return "<tr><td colspan='6'><i>(empty — inventory/servers.toml 미설정)</i></td></tr>"
-    return "".join(
-        f"<tr><td>{_e(s.name)}</td><td>{_e(s.host)}</td><td>{_e(s.user)}</td>"
-        f"<td>{_e(s.auth)}</td><td>{_e(s.role)}</td><td>{_e(', '.join(s.tags))}</td></tr>"
-        for s in inventory.values()
-    )
+        return "<tr><td colspan='6' class='muted'><i>(empty — inventory/servers.toml 미설정)</i></td></tr>"
+    rows = []
+    for s in inventory.values():
+        role_class = f"role-{s.role}"
+        tags_html = "".join(f"<span class='badge tag'>{_e(t)}</span>" for t in s.tags) or "<span class='muted'>-</span>"
+        jump_html = (
+            f"<span class='badge jump'>via {_e(s.jump)}</span>"
+            if s.jump else "<span class='muted'>-</span>"
+        )
+        rows.append(
+            f"<tr><td><b>{_e(s.name)}</b></td>"
+            f"<td><code>{_e(s.host)}</code></td>"
+            f"<td>{_e(s.user)}</td>"
+            f"<td>{_e(s.auth)}</td>"
+            f"<td><span class='badge {role_class}'>{_e(s.role)}</span></td>"
+            f"<td>{jump_html}</td>"
+            f"<td>{tags_html}</td></tr>"
+        )
+    return "".join(rows)
 
 
 def _history_rows_html(rows: list) -> str:
     if not rows:
-        return "<tr><td colspan='6'><i>(empty)</i></td></tr>"
-    return "".join(
-        f"<tr><td>{_e(r['id'])}</td><td>{_e(r['ts'][:19])}</td><td>{_e(r['server'])}</td>"
-        f"<td>{_e(r['mode'])}</td><td>{_e(r['exit_code'] if r['exit_code'] is not None else '-')}</td>"
-        f"<td><code>{_e((r['command'] or r['prompt'] or '')[:80])}</code></td></tr>"
-        for r in rows
-    )
+        return "<tr><td colspan='6' class='muted'><i>(empty)</i></td></tr>"
+    out = []
+    for r in rows:
+        exit_code = r["exit_code"]
+        exit_html = (
+            f"<span class='badge role-sudo'>{_e(exit_code)}</span>"
+            if isinstance(exit_code, int) and exit_code != 0
+            else (f"<span class='muted'>{_e(exit_code)}</span>" if exit_code is not None else "<span class='muted'>—</span>")
+        )
+        out.append(
+            f"<tr><td class='muted'>{_e(r['id'])}</td>"
+            f"<td class='muted'>{_e(r['ts'][:19])}</td>"
+            f"<td><b>{_e(r['server'])}</b></td>"
+            f"<td>{_e(r['mode'])}</td>"
+            f"<td>{exit_html}</td>"
+            f"<td><code>{_e((r['command'] or r['prompt'] or '')[:80])}</code></td></tr>"
+        )
+    return "".join(out)
 
 
 def _ask_form_html(inventory: dict[str, Server], backends: list[tuple[str, bool]]) -> str:
     if not inventory:
-        return "<p class='muted'>(인벤토리가 비어있어 ask 폼을 표시하지 않습니다)</p>"
+        return (
+            "<p class='muted'>인벤토리가 비어있어 ask 폼을 표시하지 않습니다. "
+            "<code>inventory/servers.toml</code> 을 채운 뒤 새로고침하세요.</p>"
+        )
     server_options = "".join(
         f"<label><input type='checkbox' name='targets' value='{_e(s.name)}'> "
-        f"{_e(s.name)} <span class='muted'>({_e(s.host)}, {_e(s.role)})</span></label>"
+        f"<b>{_e(s.name)}</b> <span class='muted'>({_e(s.host)} · {_e(s.role)})</span></label>"
         for s in inventory.values()
     )
-    backend_options = "<option value=''>(auto)</option>" + "".join(
+    backend_options = "<option value=''>(자동 감지)</option>" + "".join(
         f"<option value='{_e(name)}'{'' if available else ' disabled'}>{_e(name)}{'' if available else ' (미설치)'}</option>"
         for name, available in backends
     )
     return f"""
     <form method='POST' action='/ask'>
       <fieldset>
-        <legend>대상 서버</legend>
-        <div class='row'>{server_options}</div>
         <div class='row'>
-          <label>프롬프트<br>
-            <textarea name='prompt' required placeholder='예) 디스크 80% 넘는 마운트 알려줘'></textarea>
-          </label>
+          <label class='label-block'>대상 서버</label>
+          <div class='checkbox-group'>{server_options}</div>
         </div>
         <div class='row'>
-          <label>백엔드 <select name='backend'>{backend_options}</select></label>
-          <label><input type='checkbox' name='dry_run' value='1'> dry-run (실행 없이 plan 만)</label>
+          <label class='label-block' for='prompt'>프롬프트</label>
+          <textarea id='prompt' name='prompt' required placeholder='예) 디스크 80% 넘는 마운트 알려줘'></textarea>
+        </div>
+        <div class='row row-inline'>
+          <div>
+            <label class='label-block' for='backend'>LLM 백엔드</label>
+            <select id='backend' name='backend'>{backend_options}</select>
+          </div>
+          <div class='checkbox-group' style='margin-top:1.4rem'>
+            <label><input type='checkbox' name='dry_run' value='1'> dry-run (실행 없이 plan 만)</label>
+          </div>
         </div>
         <div class='row'><button type='submit'>ask</button></div>
       </fieldset>
@@ -158,18 +276,24 @@ def index() -> str:
     backends = list_backends()
 
     body = f"""
-    <h2>Ask</h2>
-    {_ask_form_html(inventory, backends)}
+    <section class='card'>
+      <h2>Ask</h2>
+      {_ask_form_html(inventory, backends)}
+    </section>
 
-    <h2>Servers</h2>
-    <table><thead><tr>
-      <th>name</th><th>host</th><th>user</th><th>auth</th><th>role</th><th>tags</th>
-    </tr></thead><tbody>{_server_rows_html(inventory)}</tbody></table>
+    <section class='card'>
+      <h2>Servers</h2>
+      <table class='dense'><thead><tr>
+        <th>name</th><th>host</th><th>user</th><th>auth</th><th>role</th><th>jump</th><th>tags</th>
+      </tr></thead><tbody>{_server_rows_html(inventory)}</tbody></table>
+    </section>
 
-    <h2>Recent history (last 20)</h2>
-    <table><thead><tr>
-      <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
-    </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
+    <section class='card'>
+      <h2>Recent history <span class='muted' style='font-weight:normal'>(last 20)</span></h2>
+      <table class='dense'><thead><tr>
+        <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
+      </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
+    </section>
     """
     return _layout(f"clopsctl {__version__}", body)
 
@@ -242,48 +366,86 @@ def ask_post(
     ).start()
 
     # SSE 스트리밍 페이지 렌더 (브라우저는 즉시 페이지 받고 EventSource 로 구독)
+    targets_html = " ".join(f"<code>{_e(t)}</code>" for t in targets)
     body = f"""
-    <h2>Ask 진행 중</h2>
-    <div class='kv'>
-      backend: <b>{_e(sel_backend.name)}</b>
-      &nbsp;|&nbsp; servers: <code>{_e(', '.join(targets))}</code>
-      &nbsp;|&nbsp; dry-run: <b>{'yes' if is_dry else 'no'}</b>
-      &nbsp;|&nbsp; job: <code>{_e(job.id)}</code>
-    </div>
-    <h3>프롬프트</h3>
-    <pre>{_e(prompt)}</pre>
-    <h3>진행</h3>
-    <div id='log' class='panel'></div>
-    <h3>답변</h3>
-    <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
-    <p><a href='/'>← 새 ask 작성</a></p>
+    <section class='card'>
+      <h2>Ask <span class='muted' style='font-weight:normal'>· {_e(sel_backend.name)}</span></h2>
+      <div class='kv'>
+        servers: {targets_html}
+        &nbsp;·&nbsp; dry-run: <b>{'yes' if is_dry else 'no'}</b>
+        &nbsp;·&nbsp; job: <code>{_e(job.id)}</code>
+      </div>
+      <h3>프롬프트</h3>
+      <pre>{_e(prompt)}</pre>
+    </section>
+
+    <section class='card'>
+      <h2>진행 <span class='muted' id='status-badge' style='font-weight:normal'>· 시작 중…</span></h2>
+      <div id='log'></div>
+    </section>
+
+    <section class='card'>
+      <h2>답변</h2>
+      <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
+      <p style='margin-top:1rem'><a href='/'>← 새 ask 작성</a></p>
+    </section>
+
     <script>
     (function() {{
       var src = new EventSource('/ask/stream/{job.id}');
       var log = document.getElementById('log');
       var answer = document.getElementById('answer');
-      function append(html_) {{ var p = document.createElement('div'); p.innerHTML = html_; log.appendChild(p); log.scrollTop = log.scrollHeight; }}
-      function escapeHtml(s) {{ var d = document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML; }}
+      var statusBadge = document.getElementById('status-badge');
+      function appendRow(icon, text, klass) {{
+        var p = document.createElement('div');
+        p.className = 'event-row ' + (klass || '');
+        p.innerHTML = '<span class="icon">' + icon + '</span>' + text;
+        log.appendChild(p);
+        log.scrollTop = log.scrollHeight;
+      }}
+      function escapeHtml(s) {{
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s == null ? '' : String(s)));
+        return d.innerHTML;
+      }}
       src.onmessage = function(ev) {{
         try {{
           var e = JSON.parse(ev.data);
-          if (e.type === 'started') append('<i class=muted>started — backend ' + escapeHtml(e.backend) + '</i>');
-          else if (e.type === 'plan_start') append('· planning…');
-          else if (e.type === 'plan_done') append('· plan: ' + e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's'));
-          else if (e.type === 'step_start') append('→ <code>' + escapeHtml(JSON.stringify(e.servers)) + '</code> :: <code>' + escapeHtml(e.command) + '</code>');
-          else if (e.type === 'step_result') append('  · ' + escapeHtml(e.server) + ' exit=' + e.exit_code);
-          else if (e.type === 'step_blocked') append('✗ blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>');
-          else if (e.type === 'step_failed') append('✗ failed: ' + escapeHtml(e.reason));
-          else if (e.type === 'step_dry_run') append('∘ dry-run: <code>' + escapeHtml(e.command) + '</code>');
-          else if (e.type === 'summarize_start') append('· summarizing…');
-          else if (e.type === 'done') {{
-            answer.innerHTML = '<pre>' + escapeHtml(e.final_text) + '</pre>';
-            answer.classList.add(e.n_failed === 0 && e.n_blocked === 0 ? 'ok' : 'warn');
-            append('<b>done</b> — steps=' + e.n_steps + ' blocked=' + e.n_blocked + ' failed=' + e.n_failed);
-          }}
-          else if (e.type === 'error') {{
-            answer.innerHTML = '<pre>error: ' + escapeHtml(e.message) + '</pre>';
-            answer.classList.add('err');
+          switch (e.type) {{
+            case 'started':
+              statusBadge.textContent = '· 진행 중';
+              appendRow('▸', 'started — backend <b>' + escapeHtml(e.backend) + '</b>'); break;
+            case 'plan_start':
+              appendRow('…', 'planning'); break;
+            case 'plan_done':
+              appendRow('✓', 'plan ready (' + e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's') + ')', 'evt-ok'); break;
+            case 'step_start':
+              appendRow('→', '<b>' + escapeHtml((e.servers || []).join(', ')) + '</b> :: <code>' + escapeHtml(e.command) + '</code>');
+              break;
+            case 'step_result':
+              var ok = e.exit_code === 0;
+              appendRow(ok ? '✓' : '✗',
+                escapeHtml(e.server) + ' exit=' + escapeHtml(e.exit_code) +
+                (e.stdout_preview ? ' <span class="muted">— ' + escapeHtml(e.stdout_preview.split('\\n')[0].slice(0, 80)) + '</span>' : ''),
+                ok ? 'evt-ok' : 'evt-failed'); break;
+            case 'step_blocked':
+              appendRow('⊘', 'blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>', 'evt-blocked'); break;
+            case 'step_failed':
+              appendRow('✗', 'failed — ' + escapeHtml(e.reason), 'evt-failed'); break;
+            case 'step_dry_run':
+              appendRow('∘', 'dry-run: <code>' + escapeHtml(e.command) + '</code>'); break;
+            case 'summarize_start':
+              appendRow('…', 'summarizing'); break;
+            case 'done':
+              answer.innerHTML = '<pre>' + escapeHtml(e.final_text) + '</pre>';
+              answer.classList.add(e.n_failed === 0 && e.n_blocked === 0 ? 'ok' : 'warn');
+              appendRow('✓', '<b>done</b> — steps=' + e.n_steps + ' blocked=' + e.n_blocked + ' failed=' + e.n_failed, 'evt-ok');
+              statusBadge.textContent = '· 완료'; break;
+            case 'error':
+              answer.innerHTML = '<pre>error: ' + escapeHtml(e.message) + '</pre>';
+              answer.classList.add('err');
+              appendRow('✗', '<b>error</b> — ' + escapeHtml(e.message), 'evt-failed');
+              statusBadge.textContent = '· 에러'; break;
           }}
         }} catch (err) {{ /* ignore parse errors */ }}
       }};

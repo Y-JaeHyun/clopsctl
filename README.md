@@ -103,6 +103,9 @@ ruff check .
 - [x] Phase 2-c-3: web UI 실시간 스트리밍 (SSE 단계별 진행 표시)
 - [x] Phase 3-a: per-server 권한 모드 (`--per-server` / `CLOPSCTL_PERMISSION_MODE`)
 - [x] Phase 3-b: 호환성 노트 (`docs/compatibility.md`)
+- [x] Phase 3-d-1: SSH ProxyJump 지원 (인벤토리 `jump` 필드, 최대 2 hop)
+- [x] Phase 3-d-2: Web UI 디자인 정돈 (카드 레이아웃, 배지, step 이벤트 색상)
+- [ ] Phase 3-e: 인벤토리 CRUD web UI (서버 추가/편집/삭제 폼)
 - [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
 
 ## 라이선스

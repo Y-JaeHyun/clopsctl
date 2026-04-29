@@ -26,3 +26,23 @@ tags       = ["stage", "db"]
 # password_env = "CLOPSCTL_LEGACY_PASSWORD"   # .env 의 변수명을 가리킴
 # role     = "shell"
 # tags     = ["legacy"]
+
+# ─── ProxyJump (bastion 경유) 예시 ───
+# 외부에서 직접 닿지 않는 사설 서버는 bastion 통해 도달.
+# `jump` 는 인벤토리의 다른 server 이름을 참조. 최대 1단계 chain (총 2 hop).
+
+# [server.bastion]
+# host       = "203.0.113.10"
+# user       = "ec2-user"
+# auth       = "pem"
+# pem_path   = "secrets/bastion.pem"
+# role       = "shell"
+# tags       = ["bastion"]
+
+# [server.private-app]
+# host       = "10.0.0.42"
+# user       = "app"
+# auth       = "agent"
+# role       = "read-only"
+# jump       = "bastion"        # bastion → 10.0.0.42
+# tags       = ["prod", "app"]

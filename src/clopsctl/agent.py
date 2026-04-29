@@ -234,10 +234,15 @@ def _execute_plan(
         _emit(on_event, "step_start", step=idx, command=command, servers=names, role=role)
         if len(target_servers) > 1:
             console.print(f"[dim]→ fan_out {names} :: {command}[/dim]")
-            execs = fan_out(target_servers, command)
+            execs = fan_out(target_servers, command, inventory=inventory)
         else:
             console.print(f"[dim]→ exec {names[0]} :: {command}[/dim]")
-            execs = [run(target_servers[0], command)]
+            from .ssh import _INVENTORY  # type: ignore[attr-defined]
+            token = _INVENTORY.set(inventory)
+            try:
+                execs = [run(target_servers[0], command)]
+            finally:
+                _INVENTORY.reset(token)
         for r in execs:
             record(
                 settings.history_db,

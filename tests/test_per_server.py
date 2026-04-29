@@ -67,7 +67,7 @@ def test_strict_mode_blocks_all_when_any_read_only(monkeypatch, base_settings, m
     """기본(strict): read-only 가 하나라도 있으면 mutating 명령은 전부 차단."""
     monkeypatch.setattr(
         agent, "fan_out",
-        lambda srvs, cmd: (_ for _ in ()).throw(AssertionError("must not run in strict")),
+        lambda srvs, cmd, **kw: (_ for _ in ()).throw(AssertionError("must not run in strict")),
     )
     monkeypatch.setattr(
         agent, "run",
@@ -94,7 +94,7 @@ def test_per_server_mode_partial_pass_through(monkeypatch, base_settings, mixed_
     settings = dataclasses.replace(base_settings, permission_mode="per_server")
     captured_targets: list[str] = []
 
-    def fake_fan_out(srvs, cmd):
+    def fake_fan_out(srvs, cmd, **kw):
         captured_targets.extend(s.name for s in srvs)
         return [ExecResult(s.name, s.host, 0, "restarted\n", "") for s in srvs]
 
@@ -151,7 +151,7 @@ def test_per_server_read_only_command_passes_all(monkeypatch, base_settings, mix
     settings = dataclasses.replace(base_settings, permission_mode="per_server")
     monkeypatch.setattr(
         agent, "fan_out",
-        lambda srvs, cmd: [ExecResult(s.name, s.host, 0, "ok\n", "") for s in srvs],
+        lambda srvs, cmd, **kw: [ExecResult(s.name, s.host, 0, "ok\n", "") for s in srvs],
     )
     backend = FakeBackend(responses=[
         json.dumps({"steps": [{"servers": ["ro-1", "ro-2", "su-1"], "command": "df -h"}]}),

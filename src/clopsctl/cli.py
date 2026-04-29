@@ -159,8 +159,9 @@ def exec_cmd(
         console.print(f"[dim]mode={mode}  role={role}  safety={'flagged' if flagged else 'ok'}  permission=ok[/dim]")
         return
 
-    # 4) 실제 실행
-    results = fan_out(servers, command)
+    # 4) 실제 실행 (jump 해석용 inventory 전달)
+    inventory = load_inventory(settings.inventory_path)
+    results = fan_out(servers, command, inventory=inventory)
     for r in results:
         record(
             settings.history_db,

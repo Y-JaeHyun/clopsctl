@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ssh-manager": {
+      "command": "npx",
+      "args": ["-y", "mcp-ssh-manager"],
+      "env": {
+        "SSH_SERVER_WEB1_HOST": "10.0.1.11",
+        "SSH_SERVER_WEB1_USER": "ec2-user",
+        "SSH_SERVER_WEB1_KEY_PATH": "${WORKSPACE}/secrets/web-1.pem"
+      }
+    }
+  }
+}

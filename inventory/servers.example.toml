@@ -1,0 +1,28 @@
+# clopsctl 서버 인벤토리 — 실제 값은 servers.toml 로 복사 후 사용
+# pem 파일은 secrets/ 또는 별도 안전한 경로에 두고 path 만 기록 (커밋 금지)
+
+[server.web-1]
+host       = "10.0.1.11"
+port       = 22
+user       = "ec2-user"
+auth       = "pem"            # pem | password | agent
+pem_path   = "secrets/web-1.pem"
+role       = "read-only"      # read-only | shell | sudo
+tags       = ["prod", "web"]
+
+[server.db-stage]
+host       = "stage-db.internal"
+port       = 22
+user       = "ops"
+auth       = "agent"
+role       = "shell"
+tags       = ["stage", "db"]
+
+# 비밀번호 인증 예시 (지양, 필요한 경우만)
+# [server.legacy]
+# host     = "192.168.10.5"
+# user     = "admin"
+# auth     = "password"
+# password_env = "CLOPSCTL_LEGACY_PASSWORD"   # .env 의 변수명을 가리킴
+# role     = "shell"
+# tags     = ["legacy"]

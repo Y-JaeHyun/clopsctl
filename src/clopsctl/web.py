@@ -15,14 +15,15 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from rich.console import Console
 
 from . import __version__
-from .config import Server, load_inventory, load_settings
+from .config import Server, load_inventory, load_settings, write_inventory
 from .history import search
 from .llm import list_backends, select_backend
+from .ssh import _resolve_jump_chain
 
 app = FastAPI(title="clopsctl", version=__version__)
 
@@ -156,6 +157,20 @@ form button.secondary { background: #6b7280; }
 .event-row .icon { display: inline-block; width: 1.2em; }
 a { color: var(--accent); }
 a:hover { color: var(--accent-hover); }
+.btn-link {
+  display: inline-block; padding: .15rem .55rem; font-size: .78rem; border: 1px solid var(--border);
+  border-radius: 4px; background: white; color: var(--text); text-decoration: none;
+}
+.btn-link:hover { background: #f3f4f6; color: var(--text); }
+.btn-link.btn-danger { color: var(--err); border-color: #fecaca; }
+.btn-link.btn-danger:hover { background: #fef2f2; color: var(--err); }
+.btn-link.btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
+.btn-link.btn-primary:hover { background: var(--accent-hover); color: white; }
+.actions { white-space: nowrap; text-align: right; }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: .8rem; }
+.section-head h2 { margin: 0; }
+.error-list { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: .65rem .9rem; border-radius: 6px; margin-bottom: 1rem; }
+.error-list ul { margin: .25rem 0 0 1rem; padding: 0; }
 """
 
 
@@ -182,7 +197,7 @@ def _layout(title: str, body: str) -> str:
 
 def _server_rows_html(inventory: dict[str, Server]) -> str:
     if not inventory:
-        return "<tr><td colspan='6' class='muted'><i>(empty — inventory/servers.toml 미설정)</i></td></tr>"
+        return "<tr><td colspan='8' class='muted'><i>(empty — inventory/servers.toml 미설정)</i></td></tr>"
     rows = []
     for s in inventory.values():
         role_class = f"role-{s.role}"
@@ -191,6 +206,10 @@ def _server_rows_html(inventory: dict[str, Server]) -> str:
             f"<span class='badge jump'>via {_e(s.jump)}</span>"
             if s.jump else "<span class='muted'>-</span>"
         )
+        actions = (
+            f"<a href='/servers/{_e(s.name)}/edit' class='btn-link'>편집</a> "
+            f"<a href='/servers/{_e(s.name)}/delete' class='btn-link btn-danger'>삭제</a>"
+        )
         rows.append(
             f"<tr><td><b>{_e(s.name)}</b></td>"
             f"<td><code>{_e(s.host)}</code></td>"
@@ -198,7 +217,8 @@ def _server_rows_html(inventory: dict[str, Server]) -> str:
             f"<td>{_e(s.auth)}</td>"
             f"<td><span class='badge {role_class}'>{_e(s.role)}</span></td>"
             f"<td>{jump_html}</td>"
-            f"<td>{tags_html}</td></tr>"
+            f"<td>{tags_html}</td>"
+            f"<td class='actions'>{actions}</td></tr>"
         )
     return "".join(rows)
 
@@ -282,9 +302,12 @@ def index() -> str:
     </section>
 
     <section class='card'>
-      <h2>Servers</h2>
+      <div class='section-head'>
+        <h2>Servers</h2>
+        <a href='/servers/new' class='btn-link btn-primary'>+ 서버 추가</a>
+      </div>
       <table class='dense'><thead><tr>
-        <th>name</th><th>host</th><th>user</th><th>auth</th><th>role</th><th>jump</th><th>tags</th>
+        <th>name</th><th>host</th><th>user</th><th>auth</th><th>role</th><th>jump</th><th>tags</th><th></th>
       </tr></thead><tbody>{_server_rows_html(inventory)}</tbody></table>
     </section>
 
@@ -493,3 +516,345 @@ def ask_stream(job_id: str):
 @app.get("/healthz")
 def healthz() -> dict[str, object]:
     return {"status": "ok", "version": __version__, "backends": dict(list_backends())}
+
+
+# --- 인벤토리 CRUD --------------------------------------------------------------
+
+import re as _re
+
+_NAME_RE = _re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+_VALID_AUTH = ("agent", "pem", "password")
+_VALID_ROLE = ("read-only", "shell", "sudo")
+
+
+def _server_form_html(
+    *,
+    inventory: dict[str, Server],
+    initial: Server | None = None,
+    errors: list[str] | None = None,
+    is_edit: bool = False,
+) -> str:
+    """Server 추가/편집 폼 HTML. initial 가 있으면 prefill."""
+    s = initial
+    name_v = s.name if s else ""
+    host_v = s.host if s else ""
+    port_v = str(s.port) if s else "22"
+    user_v = s.user if s else ""
+    auth_v = s.auth if s else "agent"
+    pem_v = s.pem_path or "" if s else ""
+    pwenv_v = s.password_env or "" if s else ""
+    role_v = s.role if s else "read-only"
+    tags_v = ", ".join(s.tags) if s and s.tags else ""
+    jump_v = s.jump or "" if s else ""
+
+    auth_opts = "".join(
+        f"<option value='{a}'{' selected' if a == auth_v else ''}>{a}</option>"
+        for a in _VALID_AUTH
+    )
+    role_opts = "".join(
+        f"<option value='{r}'{' selected' if r == role_v else ''}>{r}</option>"
+        for r in _VALID_ROLE
+    )
+    # jump 후보: 자기 자신 제외한 모든 server
+    jump_candidates = [n for n in inventory if not (s and n == s.name)]
+    jump_opts = "<option value=''>(없음 — 직접 연결)</option>" + "".join(
+        f"<option value='{_e(n)}'{' selected' if n == jump_v else ''}>{_e(n)}</option>"
+        for n in jump_candidates
+    )
+
+    title = "서버 편집" if is_edit else "서버 추가"
+    name_field = (
+        f"<input type='text' value='{_e(name_v)}' disabled> "
+        f"<input type='hidden' name='name' value='{_e(name_v)}'>"
+        if is_edit
+        else f"<input type='text' name='name' value='{_e(name_v)}' required pattern='[A-Za-z0-9_][A-Za-z0-9_.\\-]*' placeholder='예: web-1'>"
+    )
+    name_help = (
+        "<p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>name 은 변경할 수 없습니다 (jump 참조 보호).</p>"
+        if is_edit
+        else "<p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>영숫자/_/-/. 만 사용. 예: web-1, db.stage.</p>"
+    )
+
+    errors_html = ""
+    if errors:
+        items = "".join(f"<li>{_e(err)}</li>" for err in errors)
+        errors_html = f"<div class='error-list'><b>입력 오류</b><ul>{items}</ul></div>"
+
+    action_url = f"/servers/{_e(name_v)}" if is_edit else "/servers"
+    return f"""
+    <section class='card'>
+      <h2>{title}</h2>
+      {errors_html}
+      <form method='POST' action='{action_url}'>
+        <div class='row'>
+          <label class='label-block'>이름 <span class='muted'>(서버 식별자)</span></label>
+          {name_field}
+          {name_help}
+        </div>
+
+        <div class='row row-inline'>
+          <div>
+            <label class='label-block'>호스트</label>
+            <input type='text' name='host' value='{_e(host_v)}' required placeholder='10.0.1.5 또는 example.internal'>
+          </div>
+          <div style='flex:0 0 130px'>
+            <label class='label-block'>포트</label>
+            <input type='number' name='port' value='{_e(port_v)}' min='1' max='65535'>
+          </div>
+          <div>
+            <label class='label-block'>사용자</label>
+            <input type='text' name='user' value='{_e(user_v)}' required placeholder='ec2-user / root / ops'>
+          </div>
+        </div>
+
+        <div class='row row-inline'>
+          <div>
+            <label class='label-block'>인증 방식</label>
+            <select name='auth'>{auth_opts}</select>
+            <p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>agent = ssh-agent · pem = 키 파일 · password = .env 변수</p>
+          </div>
+          <div>
+            <label class='label-block'>pem 파일 경로 <span class='muted'>(auth=pem)</span></label>
+            <input type='text' name='pem_path' value='{_e(pem_v)}' placeholder='secrets/web-1.pem'>
+          </div>
+          <div>
+            <label class='label-block'>비밀번호 환경변수 <span class='muted'>(auth=password)</span></label>
+            <input type='text' name='password_env' value='{_e(pwenv_v)}' placeholder='CLOPSCTL_LEGACY_PASSWORD'>
+          </div>
+        </div>
+
+        <div class='row row-inline'>
+          <div>
+            <label class='label-block'>role</label>
+            <select name='role'>{role_opts}</select>
+            <p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>read-only=조회만, shell=일반, sudo=전체</p>
+          </div>
+          <div>
+            <label class='label-block'>jump 서버 <span class='muted'>(선택)</span></label>
+            <select name='jump'>{jump_opts}</select>
+            <p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>bastion 경유 시 선택. 최대 1단계 chain (총 2 hop).</p>
+          </div>
+        </div>
+
+        <div class='row'>
+          <label class='label-block'>tags <span class='muted'>(콤마 구분)</span></label>
+          <input type='text' name='tags' value='{_e(tags_v)}' placeholder='prod, web, kr'>
+        </div>
+
+        <div class='row'>
+          <button type='submit'>{'저장' if is_edit else '추가'}</button>
+          &nbsp;<a href='/' class='btn-link'>취소</a>
+        </div>
+      </form>
+    </section>
+    """
+
+
+def _validate_server_input(
+    form: dict[str, str],
+    inventory: dict[str, Server],
+    *,
+    is_edit: bool,
+) -> tuple[Server | None, list[str]]:
+    """폼 dict 를 검증하고 (Server | None, errors) 반환."""
+    errors: list[str] = []
+    name = (form.get("name") or "").strip()
+    host = (form.get("host") or "").strip()
+    user = (form.get("user") or "").strip()
+    port_raw = (form.get("port") or "22").strip()
+    auth = (form.get("auth") or "agent").strip()
+    pem_path = (form.get("pem_path") or "").strip() or None
+    password_env = (form.get("password_env") or "").strip() or None
+    role = (form.get("role") or "read-only").strip()
+    tags_raw = (form.get("tags") or "").strip()
+    jump = (form.get("jump") or "").strip() or None
+
+    if not name:
+        errors.append("name 이 비어있습니다.")
+    elif not _NAME_RE.match(name):
+        errors.append(f"name '{name}' 은 영숫자·_·-·. 만 허용합니다.")
+    elif not is_edit and name in inventory:
+        errors.append(f"name '{name}' 가 이미 존재합니다.")
+
+    if not host:
+        errors.append("host 가 비어있습니다.")
+    if not user:
+        errors.append("user 가 비어있습니다.")
+
+    try:
+        port = int(port_raw)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        errors.append(f"port '{port_raw}' 가 1-65535 범위를 벗어납니다.")
+        port = 22
+
+    if auth not in _VALID_AUTH:
+        errors.append(f"auth '{auth}' 는 {list(_VALID_AUTH)} 중 하나여야 합니다.")
+    if role not in _VALID_ROLE:
+        errors.append(f"role '{role}' 는 {list(_VALID_ROLE)} 중 하나여야 합니다.")
+
+    if auth == "pem" and not pem_path:
+        errors.append("auth=pem 인 경우 pem_path 가 필요합니다.")
+    if auth == "password" and not password_env:
+        errors.append("auth=password 인 경우 password_env (환경변수 이름) 가 필요합니다.")
+
+    tags: tuple[str, ...] = tuple(t.strip() for t in tags_raw.split(",") if t.strip())
+
+    if jump:
+        if jump == name:
+            errors.append("jump 가 자기 자신을 가리킵니다.")
+        elif jump not in inventory:
+            errors.append(f"jump '{jump}' 는 인벤토리에 없는 서버입니다.")
+
+    if errors:
+        return None, errors
+
+    server = Server(
+        name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
+        pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
+        tags=tags, jump=jump,
+    )
+
+    # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출
+    new_inv = dict(inventory)
+    new_inv[name] = server
+    try:
+        _resolve_jump_chain(server, new_inv)
+    except ValueError as exc:
+        errors.append(f"jump 검증 실패: {exc}")
+        return None, errors
+
+    return server, []
+
+
+@app.get("/servers/new", response_class=HTMLResponse)
+def servers_new() -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    body = _server_form_html(inventory=inventory, is_edit=False)
+    return _layout("clopsctl — 서버 추가", body)
+
+
+@app.post("/servers", response_class=HTMLResponse)
+async def servers_create(request: Request) -> str:
+    form_data = await request.form()
+    form = {k: str(v) for k, v in form_data.items()}
+    return _handle_server_create_or_update(form, name_path=None)
+
+
+@app.get("/servers/{name}/edit", response_class=HTMLResponse)
+def servers_edit(name: str) -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    if name not in inventory:
+        raise HTTPException(status_code=404, detail=f"server '{name}' not found")
+    body = _server_form_html(inventory=inventory, initial=inventory[name], is_edit=True)
+    return _layout(f"clopsctl — {name} 편집", body)
+
+
+@app.post("/servers/{name}", response_class=HTMLResponse)
+async def servers_update(name: str, request: Request) -> str:
+    form_data = await request.form()
+    form = {k: str(v) for k, v in form_data.items()}
+    form["name"] = name  # path 의 name 강제 (편집 시 변경 금지)
+    return _handle_server_create_or_update(form, name_path=name)
+
+
+def _handle_server_create_or_update(form: dict[str, str], name_path: str | None) -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    is_edit = name_path is not None
+
+    if is_edit and name_path not in inventory:
+        raise HTTPException(status_code=404, detail=f"server '{name_path}' not found")
+
+    # 검증 시 자기 자신은 jump 후보에서 제외 — 편집인 경우 inventory 에서 빼고 새로 검증
+    inv_for_check = {k: v for k, v in inventory.items() if k != name_path} if is_edit else inventory
+    server, errors = _validate_server_input(form, inv_for_check, is_edit=is_edit)
+
+    if errors or server is None:
+        # 폼 다시 렌더 (값 prefill)
+        try:
+            initial = Server(
+                name=form.get("name", "") or "",
+                host=form.get("host", "") or "",
+                user=form.get("user", "") or "",
+                port=int(form.get("port", "22") or 22),
+                auth=form.get("auth", "agent") or "agent",  # type: ignore[arg-type]
+                pem_path=(form.get("pem_path") or None),
+                password_env=(form.get("password_env") or None),
+                role=form.get("role", "read-only") or "read-only",  # type: ignore[arg-type]
+                tags=tuple(t.strip() for t in (form.get("tags", "") or "").split(",") if t.strip()),
+                jump=(form.get("jump") or None),
+            )
+        except (ValueError, TypeError):
+            initial = inventory.get(name_path) if is_edit else None
+        body = _server_form_html(inventory=inventory, initial=initial, errors=errors, is_edit=is_edit)
+        return _layout("clopsctl — 입력 오류", body)
+
+    inventory[server.name] = server
+    write_inventory(settings.inventory_path, inventory)
+
+    body = (
+        f"<section class='card'><h2>{'편집됨' if is_edit else '추가됨'}</h2>"
+        f"<p>server <code>{_e(server.name)}</code> 가 인벤토리에 저장되었습니다.</p>"
+        f"<p><a href='/' class='btn-link btn-primary'>← 인벤토리 보기</a></p></section>"
+    )
+    return _layout("clopsctl — saved", body)
+
+
+@app.get("/servers/{name}/delete", response_class=HTMLResponse)
+def servers_delete_confirm(name: str) -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    if name not in inventory:
+        raise HTTPException(status_code=404, detail=f"server '{name}' not found")
+
+    # 다른 서버가 jump 로 참조 중인지 확인
+    referenced_by = [n for n, s in inventory.items() if s.jump == name]
+    blocked = bool(referenced_by)
+
+    body = f"""
+    <section class='card'>
+      <h2>서버 삭제</h2>
+      <p><code>{_e(name)}</code> 를 인벤토리에서 삭제합니다. 이 작업은 되돌릴 수 없습니다.</p>
+      {('<div class="error-list"><b>차단됨</b><ul><li>다음 서버들이 jump 로 이 서버를 참조 중입니다: '
+        + ', '.join(f'<code>{_e(n)}</code>' for n in referenced_by)
+        + '. 먼저 해당 서버들의 jump 를 변경하거나 삭제하세요.</li></ul></div>') if blocked else ''}
+      <form method='POST' action='/servers/{_e(name)}/delete'>
+        <p style='margin-top:1rem'>
+          {('<button type="submit" disabled>삭제 (차단됨)</button>' if blocked else '<button type="submit" class="btn-primary" style="background:var(--err)">삭제 확인</button>')}
+          &nbsp;<a href='/' class='btn-link'>취소</a>
+        </p>
+      </form>
+    </section>
+    """
+    return _layout(f"clopsctl — {name} 삭제", body)
+
+
+@app.post("/servers/{name}/delete", response_class=HTMLResponse)
+def servers_delete(name: str) -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    if name not in inventory:
+        raise HTTPException(status_code=404, detail=f"server '{name}' not found")
+
+    referenced_by = [n for n, s in inventory.items() if s.jump == name]
+    if referenced_by:
+        body = (
+            f"<section class='card'><h2>삭제 차단됨</h2>"
+            f"<div class='error-list'>다음 서버들이 jump 로 참조 중입니다: "
+            f"{', '.join(f'<code>{_e(n)}</code>' for n in referenced_by)}.</div>"
+            f"<p><a href='/' class='btn-link'>← 돌아가기</a></p></section>"
+        )
+        return _layout("clopsctl — delete blocked", body)
+
+    del inventory[name]
+    write_inventory(settings.inventory_path, inventory)
+    body = (
+        f"<section class='card'><h2>삭제됨</h2>"
+        f"<p>server <code>{_e(name)}</code> 가 인벤토리에서 제거되었습니다.</p>"
+        f"<p><a href='/' class='btn-link btn-primary'>← 인벤토리 보기</a></p></section>"
+    )
+    return _layout("clopsctl — deleted", body)

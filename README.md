@@ -105,7 +105,7 @@ ruff check .
 - [x] Phase 3-b: 호환성 노트 (`docs/compatibility.md`)
 - [x] Phase 3-d-1: SSH ProxyJump 지원 (인벤토리 `jump` 필드, 최대 2 hop)
 - [x] Phase 3-d-2: Web UI 디자인 정돈 (카드 레이아웃, 배지, step 이벤트 색상)
-- [ ] Phase 3-e: 인벤토리 CRUD web UI (서버 추가/편집/삭제 폼)
+- [x] Phase 3-e: 인벤토리 CRUD web UI (모든 Server 필드 폼 + jump 드롭다운 + cycle 검증)
 - [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
 
 ## 라이선스

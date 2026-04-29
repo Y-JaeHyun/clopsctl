@@ -81,3 +81,47 @@ def load_inventory(path: Path) -> dict[str, Server]:
             jump=cfg.get("jump"),
         )
     return servers
+
+
+def server_to_dict(s: Server) -> dict[str, object]:
+    """Server → TOML-serializable dict (None/빈값 제외)."""
+    out: dict[str, object] = {
+        "host": s.host,
+        "port": s.port,
+        "user": s.user,
+        "auth": s.auth,
+        "role": s.role,
+    }
+    if s.pem_path:
+        out["pem_path"] = s.pem_path
+    if s.password_env:
+        out["password_env"] = s.password_env
+    if s.tags:
+        out["tags"] = list(s.tags)
+    if s.jump:
+        out["jump"] = s.jump
+    return out
+
+
+def write_inventory(path: Path, servers: dict[str, Server]) -> None:
+    """servers dict 를 TOML 로 atomic write. 기존 파일 덮어씀.
+
+    파일 권한 600 (소유자만) 으로 설정. 파일 위에 안내 주석 포함.
+    """
+    import tomli_w
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"server": {name: server_to_dict(s) for name, s in servers.items()}}
+    body = tomli_w.dumps(payload)
+    header = (
+        "# clopsctl 인벤토리 — clopsctl web 또는 직접 편집으로 수정 가능.\n"
+        "# pem 파일은 secrets/ 등 안전한 경로에 두고 path 만 기록 (커밋 금지).\n"
+        "\n"
+    )
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(header + body, encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass  # Windows 등에서 chmod 무시
+    tmp.replace(path)

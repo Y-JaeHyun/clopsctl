@@ -125,7 +125,7 @@ def test_ask_post_happy_path_streams_events(client, monkeypatch):
     """POST 가 즉시 streaming 페이지 반환, 백그라운드 thread 가 큐에 이벤트 push."""
     captured: dict = {}
 
-    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None):
+    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None, **kw):
         captured.update(prompt=prompt, targets=[t.name for t in targets], dry_run=dry_run)
         if on_event:
             on_event({"type": "started", "backend": backend.name, "dry_run": dry_run, "servers": [t.name for t in targets]})
@@ -171,7 +171,7 @@ def test_ask_post_happy_path_streams_events(client, monkeypatch):
 
 
 def test_ask_post_dry_run_emits_done_event(client, monkeypatch):
-    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None):
+    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None, **kw):
         assert dry_run is True
         if on_event:
             on_event({"type": "step_dry_run", "step": 0, "command": "df -h", "servers": ["web-1"]})
@@ -232,7 +232,7 @@ def test_ask_post_backend_unavailable(client, monkeypatch):
 
 def test_ask_post_html_escapes_prompt(client, monkeypatch):
     """XSS 방지 — 폼 페이지에 echo 되는 prompt 가 escape 처리되어야."""
-    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None):
+    def fake_ask(prompt, targets, *, settings, console, backend, dry_run=False, on_event=None, **kw):
         if on_event:
             on_event({"type": "done", "final_text": "ok", "n_steps": 0, "n_blocked": 0, "n_failed": 0})
         return AskOutcome(final_text="ok", backend_name="claude",

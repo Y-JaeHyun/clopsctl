@@ -42,11 +42,28 @@ JOBS: dict[str, Job] = {}
 JOB_TTL_SECS = 600  # 10분 후 자동 청소
 
 
+@dataclass
+class Conversation:
+    """ask 한 흐름을 follow-up 으로 이어나가기 위한 turn 기록."""
+    id: str
+    targets: list[str]                    # 첫 turn 의 서버 — follow-up 도 동일 대상
+    backend_name: str
+    turns: list[dict[str, Any]] = field(default_factory=list)
+    started_at: float = field(default_factory=time.monotonic)
+
+
+CONVERSATIONS: dict[str, Conversation] = {}
+CONVERSATION_TTL_SECS = 1800  # 30분 idle 후 자동 청소
+
+
 def _cleanup_old_jobs() -> None:
     now = time.monotonic()
     stale = [jid for jid, j in JOBS.items() if j.done and now - j.started_at > JOB_TTL_SECS]
     for jid in stale:
         JOBS.pop(jid, None)
+    stale_conv = [cid for cid, c in CONVERSATIONS.items() if now - c.started_at > CONVERSATION_TTL_SECS]
+    for cid in stale_conv:
+        CONVERSATIONS.pop(cid, None)
 
 
 # --- helpers ----------------------------------------------------------------
@@ -171,6 +188,8 @@ a:hover { color: var(--accent-hover); }
 .section-head h2 { margin: 0; }
 .error-list { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: .65rem .9rem; border-radius: 6px; margin-bottom: 1rem; }
 .error-list ul { margin: .25rem 0 0 1rem; padding: 0; }
+.turn-prior { background: #fafbfc; }
+.turn-prior h2 { color: #6b7280; }
 """
 
 
@@ -322,12 +341,20 @@ def index() -> str:
 
 
 def _run_ask_job(
-    job: Job, prompt: str, targets: list[Server], settings, backend, dry_run: bool
+    job: Job, prompt: str, targets: list[Server], settings, backend, dry_run: bool,
+    *, conversation_id: str | None = None, prior_turns: list[dict[str, Any]] | None = None,
 ) -> None:
-    """별도 thread 에서 agent.ask 실행 — 모든 진행 이벤트를 job.queue 에 push."""
+    """별도 thread 에서 agent.ask 실행 — 진행 이벤트는 큐로, 완료된 turn 은 conversation 에 append."""
     from . import agent
 
+    captured: dict[str, Any] = {"final_text": None, "n_steps": 0, "n_blocked": 0, "n_failed": 0}
+
     def emit(evt: dict[str, Any]) -> None:
+        if evt.get("type") == "done":
+            captured["final_text"] = evt.get("final_text")
+            captured["n_steps"] = evt.get("n_steps", 0)
+            captured["n_blocked"] = evt.get("n_blocked", 0)
+            captured["n_failed"] = evt.get("n_failed", 0)
         job.queue.put(evt)
 
     quiet_console = Console(quiet=True)
@@ -335,11 +362,25 @@ def _run_ask_job(
         agent.ask(
             prompt, targets, settings=settings, console=quiet_console,
             backend=backend, dry_run=dry_run, on_event=emit,
+            prior_turns=prior_turns,
         )
     except Exception as exc:  # noqa: BLE001
         emit({"type": "error", "message": str(exc)})
+    else:
+        # conversation turn 기록 (정상 완료 시)
+        if conversation_id and conversation_id in CONVERSATIONS:
+            CONVERSATIONS[conversation_id].turns.append(
+                {
+                    "prompt": prompt,
+                    "final_text": captured["final_text"] or "",
+                    "n_steps": captured["n_steps"],
+                    "n_blocked": captured["n_blocked"],
+                    "n_failed": captured["n_failed"],
+                    "dry_run": dry_run,
+                }
+            )
     finally:
-        emit({"type": "_eof"})  # 스트림 종료 신호
+        emit({"type": "_eof"})
         job.done = True
 
 
@@ -349,10 +390,24 @@ def ask_post(
     targets: Annotated[list[str], Form()] = [],
     backend: Annotated[str, Form()] = "",
     dry_run: Annotated[str, Form()] = "",
+    conversation_id: Annotated[str, Form()] = "",
 ) -> str:
-    """ask 폼 POST — job 시작 후 SSE 스트리밍 페이지 렌더."""
+    """ask 폼 POST — job 시작 후 SSE 스트리밍 페이지 렌더.
+
+    conversation_id 가 주어지면 follow-up 으로 처리: 기존 conversation 의 이전 turn 들을
+    LLM 프롬프트에 컨텍스트로 전달하고, 페이지에 누적 turn 을 함께 렌더.
+    """
     settings = load_settings()
     inventory = load_inventory(settings.inventory_path)
+
+    _cleanup_old_jobs()
+
+    # follow-up 인 경우 기존 conversation 의 targets 를 그대로 사용 (UI 단순화)
+    conv: Conversation | None = None
+    if conversation_id and conversation_id in CONVERSATIONS:
+        conv = CONVERSATIONS[conversation_id]
+        if not targets:
+            targets = list(conv.targets)
 
     # 입력 검증
     errors: list[str] = []
@@ -378,39 +433,74 @@ def ask_post(
         return _layout("clopsctl — error", body)
 
     is_dry = bool(dry_run)
-    _cleanup_old_jobs()
+
+    # conversation 생성 또는 활용
+    if conv is None:
+        conv = Conversation(
+            id=uuid.uuid4().hex,
+            targets=list(targets),
+            backend_name=sel_backend.name,
+        )
+        CONVERSATIONS[conv.id] = conv
+    prior_turns = list(conv.turns)  # 시작 시점 snapshot
+
     job = Job(id=uuid.uuid4().hex)
     JOBS[job.id] = job
 
     Thread(
         target=_run_ask_job,
         args=(job, prompt, selected_servers, settings, sel_backend, is_dry),
+        kwargs={"conversation_id": conv.id, "prior_turns": prior_turns},
         daemon=True,
     ).start()
 
     # SSE 스트리밍 페이지 렌더 (브라우저는 즉시 페이지 받고 EventSource 로 구독)
     targets_html = " ".join(f"<code>{_e(t)}</code>" for t in targets)
+    # 이전 turn 누적 표시
+    prior_html = ""
+    for i, t in enumerate(prior_turns, 1):
+        style = "ok" if t.get("n_failed", 0) == 0 and t.get("n_blocked", 0) == 0 else "warn"
+        prior_html += f"""
+        <section class='card turn-prior'>
+          <h2>Turn {i} <span class='muted' style='font-weight:normal'>· steps={t.get('n_steps', 0)} blocked={t.get('n_blocked', 0)} failed={t.get('n_failed', 0)}</span></h2>
+          <h3>프롬프트</h3>
+          <pre>{_e(t.get('prompt', ''))}</pre>
+          <h3>답변</h3>
+          <div class='panel {style}'><pre>{_e(t.get('final_text', ''))}</pre></div>
+        </section>
+        """
+
+    current_turn_no = len(prior_turns) + 1
     body = f"""
+    {prior_html}
     <section class='card'>
-      <h2>Ask <span class='muted' style='font-weight:normal'>· {_e(sel_backend.name)}</span></h2>
+      <h2>Turn {current_turn_no} <span class='muted' style='font-weight:normal'>· {_e(sel_backend.name)}</span></h2>
       <div class='kv'>
         servers: {targets_html}
         &nbsp;·&nbsp; dry-run: <b>{'yes' if is_dry else 'no'}</b>
+        &nbsp;·&nbsp; conv: <code>{_e(conv.id)}</code>
         &nbsp;·&nbsp; job: <code>{_e(job.id)}</code>
       </div>
       <h3>프롬프트</h3>
       <pre>{_e(prompt)}</pre>
-    </section>
-
-    <section class='card'>
-      <h2>진행 <span class='muted' id='status-badge' style='font-weight:normal'>· 시작 중…</span></h2>
+      <h3>진행 <span class='muted' id='status-badge' style='font-weight:normal'>· 시작 중…</span></h3>
       <div id='log'></div>
+      <h3 style='margin-top:1rem'>답변</h3>
+      <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
     </section>
 
-    <section class='card'>
-      <h2>답변</h2>
-      <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
-      <p style='margin-top:1rem'><a href='/'>← 새 ask 작성</a></p>
+    <section class='card' id='followup-card' style='opacity:.55'>
+      <h2>이어서 질문 <span class='muted' style='font-weight:normal'>· 같은 대상 서버 + 이전 답변 컨텍스트 유지</span></h2>
+      <form method='POST' action='/ask' id='followup-form'>
+        <input type='hidden' name='conversation_id' value='{_e(conv.id)}'>
+        <div class='row'>
+          <textarea name='prompt' id='followup-prompt' placeholder='이전 답변에 대해 추가 질문…' disabled></textarea>
+        </div>
+        <div class='row'>
+          <button type='submit' id='followup-btn' disabled>이어서 질문</button>
+          &nbsp;<a href='/' class='btn-link'>새 ask 작성</a>
+        </div>
+      </form>
     </section>
 
     <script>
@@ -430,6 +520,14 @@ def ask_post(
         var d = document.createElement('div');
         d.appendChild(document.createTextNode(s == null ? '' : String(s)));
         return d.innerHTML;
+      }}
+      function enableFollowup() {{
+        var card = document.getElementById('followup-card');
+        var input = document.getElementById('followup-prompt');
+        var btn = document.getElementById('followup-btn');
+        if (card) card.style.opacity = '1';
+        if (input) {{ input.disabled = false; input.focus(); }}
+        if (btn) btn.disabled = false;
       }}
       src.onmessage = function(ev) {{
         try {{
@@ -463,12 +561,14 @@ def ask_post(
               answer.innerHTML = '<pre>' + escapeHtml(e.final_text) + '</pre>';
               answer.classList.add(e.n_failed === 0 && e.n_blocked === 0 ? 'ok' : 'warn');
               appendRow('✓', '<b>done</b> — steps=' + e.n_steps + ' blocked=' + e.n_blocked + ' failed=' + e.n_failed, 'evt-ok');
-              statusBadge.textContent = '· 완료'; break;
+              statusBadge.textContent = '· 완료';
+              enableFollowup(); break;
             case 'error':
               answer.innerHTML = '<pre>error: ' + escapeHtml(e.message) + '</pre>';
               answer.classList.add('err');
               appendRow('✗', '<b>error</b> — ' + escapeHtml(e.message), 'evt-failed');
-              statusBadge.textContent = '· 에러'; break;
+              statusBadge.textContent = '· 에러';
+              enableFollowup(); break;
           }}
         }} catch (err) {{ /* ignore parse errors */ }}
       }};

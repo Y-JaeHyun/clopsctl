@@ -107,7 +107,7 @@ ruff check .
 - [x] Phase 3-d-2: Web UI 디자인 정돈 (카드 레이아웃, 배지, step 이벤트 색상)
 - [x] Phase 3-e: 인벤토리 CRUD web UI (모든 Server 필드 폼 + jump 드롭다운 + cycle 검증)
 - [x] Phase 4-a: 대화형 follow-up (Conversation, prior_turns, 이전 turn 카드 누적)
-- [ ] Phase 4-b: 인터랙티브 SSH 터미널 UI (xterm.js + WebSocket + paramiko PTY)
+- [x] Phase 4-b: 인터랙티브 SSH 터미널 UI (xterm.js + WebSocket + paramiko PTY, role gate, 명령 buffer 기록, 다중 세션)
 - [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
 
 ## 라이선스

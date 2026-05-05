@@ -15,15 +15,15 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 from rich.console import Console
 
 from . import __version__
 from .config import Server, load_inventory, load_settings, write_inventory
-from .history import search
+from .history import record as history_record, search
 from .llm import list_backends, select_backend
-from .ssh import _resolve_jump_chain
+from .ssh import _resolve_jump_chain, open_shell
 
 app = FastAPI(title="clopsctl", version=__version__)
 
@@ -225,7 +225,13 @@ def _server_rows_html(inventory: dict[str, Server]) -> str:
             f"<span class='badge jump'>via {_e(s.jump)}</span>"
             if s.jump else "<span class='muted'>-</span>"
         )
+        terminal_btn = (
+            f"<a href='/terminal/{_e(s.name)}' class='btn-link' target='_blank'>터미널</a> "
+            if s.role in ("shell", "sudo")
+            else "<span class='btn-link' style='opacity:.4;cursor:not-allowed' title='read-only role 은 터미널 사용 불가'>터미널</span> "
+        )
         actions = (
+            f"{terminal_btn}"
             f"<a href='/servers/{_e(s.name)}/edit' class='btn-link'>편집</a> "
             f"<a href='/servers/{_e(s.name)}/delete' class='btn-link btn-danger'>삭제</a>"
         )
@@ -611,6 +617,289 @@ def ask_stream(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# --- Interactive SSH terminal (xterm.js + WebSocket + paramiko PTY) ----------
+
+XTERM_CDN_JS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
+XTERM_CDN_CSS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
+XTERM_FIT_CDN = "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
+
+
+@app.get("/terminal/{name}", response_class=HTMLResponse)
+def terminal_page(name: str) -> str:
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    if name not in inventory:
+        raise HTTPException(status_code=404, detail=f"server '{name}' not found")
+    srv = inventory[name]
+    if srv.role not in ("shell", "sudo"):
+        body = (
+            "<section class='card'><h2>터미널 사용 불가</h2>"
+            f"<p>server <code>{_e(name)}</code> 의 role 이 <b>{_e(srv.role)}</b> 입니다.</p>"
+            "<p>터미널은 <code>shell</code> 또는 <code>sudo</code> role 에서만 사용 가능합니다. "
+            "(read-only 보호) 인벤토리에서 role 변경 후 다시 시도하세요.</p>"
+            "<p><a href='/' class='btn-link'>← 인벤토리</a></p></section>"
+        )
+        return _layout("clopsctl — terminal blocked", body)
+
+    # 추가 CSS — xterm 컨테이너 풀 사이즈
+    body = f"""
+    <section class='card'>
+      <div class='section-head'>
+        <h2>터미널 — <code>{_e(srv.name)}</code> <span class='muted' style='font-weight:normal'>· {_e(srv.user)}@{_e(srv.host)}{':' + str(srv.port) if srv.port != 22 else ''}{' via ' + _e(srv.jump) if srv.jump else ''}</span></h2>
+        <a href='/' class='btn-link'>닫기</a>
+      </div>
+      <div class='kv'>
+        role: <span class='badge role-{_e(srv.role)}'>{_e(srv.role)}</span>
+        &nbsp;·&nbsp; <span id='conn-status' class='muted'>연결 중…</span>
+      </div>
+      <link rel='stylesheet' href='{XTERM_CDN_CSS}'>
+      <div id='term' style='height:520px;background:#0b1220;border-radius:6px;padding:.5rem;'></div>
+      <p class='muted' style='font-size:.78rem;margin-top:.5rem'>
+        세션 시작/종료, Enter 까지 입력된 명령이 history(<code>mode=terminal*</code>)에 기록됩니다.
+        브라우저 탭을 닫으면 세션도 종료됩니다.
+      </p>
+    </section>
+    <script src='{XTERM_CDN_JS}'></script>
+    <script src='{XTERM_FIT_CDN}'></script>
+    <script>
+    (function() {{
+      var term = new Terminal({{
+        cursorBlink: true,
+        fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+        fontSize: 13,
+        theme: {{ background: '#0b1220', foreground: '#e2e8f0', cursor: '#60a5fa' }},
+      }});
+      var fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open(document.getElementById('term'));
+      try {{ fit.fit(); }} catch (e) {{}}
+      var status = document.getElementById('conn-status');
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var ws = new WebSocket(proto + '//' + location.host + '/ws/terminal/{_e(srv.name)}');
+      ws.onopen = function() {{
+        status.textContent = '연결됨';
+        status.className = '';
+        status.style.color = 'var(--ok)';
+        sendResize();
+      }};
+      ws.onmessage = function(ev) {{
+        if (typeof ev.data === 'string') {{
+          term.write(ev.data);
+        }} else {{
+          ev.data.text().then(function(t) {{ term.write(t); }});
+        }}
+      }};
+      ws.onclose = function(ev) {{
+        status.textContent = '종료됨' + (ev.reason ? ' — ' + ev.reason : '');
+        status.style.color = 'var(--muted)';
+        term.write('\\r\\n[연결 종료]\\r\\n');
+      }};
+      ws.onerror = function() {{
+        status.textContent = '오류';
+        status.style.color = 'var(--err)';
+      }};
+      term.onData(function(data) {{
+        if (ws.readyState === 1) ws.send(JSON.stringify({{type: 'input', data: data}}));
+      }});
+      function sendResize() {{
+        if (ws.readyState !== 1) return;
+        ws.send(JSON.stringify({{type: 'resize', cols: term.cols, rows: term.rows}}));
+      }}
+      window.addEventListener('resize', function() {{
+        try {{ fit.fit(); }} catch (e) {{}}
+        sendResize();
+      }});
+      window.addEventListener('beforeunload', function() {{
+        try {{ ws.close(); }} catch (e) {{}}
+      }});
+    }})();
+    </script>
+    """
+    return _layout(f"clopsctl — terminal {name}", body)
+
+
+def _terminal_bridge_loop(channel, ws_send_bytes, on_close):
+    """paramiko channel → WebSocket 으로 stdout 전달. 별도 thread."""
+    import asyncio
+    try:
+        while True:
+            if channel.recv_ready():
+                data = channel.recv(4096)
+                if not data:
+                    break
+                asyncio.run(ws_send_bytes(data))
+                continue
+            if channel.exit_status_ready():
+                if channel.recv_ready():
+                    data = channel.recv(4096)
+                    if data:
+                        asyncio.run(ws_send_bytes(data))
+                break
+            if channel.closed:
+                break
+            time.sleep(0.02)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        try:
+            on_close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.websocket("/ws/terminal/{name}")
+async def terminal_ws(ws: WebSocket, name: str) -> None:
+    """xterm.js 와 paramiko PTY 사이 양방향 bridge."""
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    if name not in inventory:
+        await ws.close(code=4404, reason="unknown server")
+        return
+    srv = inventory[name]
+    if srv.role not in ("shell", "sudo"):
+        await ws.close(code=4403, reason="terminal blocked for read-only role")
+        return
+
+    await ws.accept()
+    session_id = uuid.uuid4().hex
+    history_record(
+        settings.history_db, server=srv.name, mode="terminal_start",
+        command=f"session={session_id}", stderr="",
+    )
+
+    # paramiko PTY 채널 열기 (jump 체인 자동)
+    try:
+        channel, clients = open_shell(srv, inventory, term="xterm-256color", cols=80, rows=24)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            await ws.send_text(f"\r\n[연결 실패] {exc}\r\n")
+        finally:
+            history_record(
+                settings.history_db, server=srv.name, mode="terminal_end",
+                command=f"session={session_id}", stderr=f"connect failed: {exc}",
+            )
+            await ws.close(code=4500, reason="connect failed")
+        return
+
+    closed = False
+
+    async def send_bytes_async(b: bytes) -> None:
+        nonlocal closed
+        if closed:
+            return
+        try:
+            await ws.send_text(b.decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001
+            closed = True
+
+    def on_remote_close() -> None:
+        nonlocal closed
+        closed = True
+
+    # paramiko → WebSocket 펌프 (별도 thread)
+    def remote_to_ws() -> None:
+        import asyncio as _aio
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        try:
+            while not closed:
+                if channel.recv_ready():
+                    data = channel.recv(4096)
+                    if not data:
+                        break
+                    loop.run_until_complete(send_bytes_async(data))
+                    continue
+                if channel.exit_status_ready() or channel.closed:
+                    if channel.recv_ready():
+                        data = channel.recv(4096)
+                        if data:
+                            loop.run_until_complete(send_bytes_async(data))
+                    break
+                time.sleep(0.02)
+        finally:
+            loop.close()
+            on_remote_close()
+
+    pump = Thread(target=remote_to_ws, daemon=True)
+    pump.start()
+
+    # 명령 buffer (Enter 단위 기록 — best-effort)
+    cmd_buf: list[str] = []
+
+    def flush_cmd() -> None:
+        text = "".join(cmd_buf).rstrip("\r\n")
+        cmd_buf.clear()
+        if not text.strip():
+            return
+        # 컨트롤 문자 일부 정리 (백스페이스 적용)
+        cleaned: list[str] = []
+        for ch in text:
+            if ch in ("\x7f", "\x08"):  # backspace
+                if cleaned:
+                    cleaned.pop()
+            elif ord(ch) < 0x20 and ch != "\t":
+                continue  # 기타 control char 무시
+            else:
+                cleaned.append(ch)
+        line = "".join(cleaned).strip()
+        if not line:
+            return
+        try:
+            history_record(
+                settings.history_db, server=srv.name, mode="terminal",
+                command=line[:500],
+            )
+        except Exception:  # noqa: BLE001
+            pass  # best-effort
+
+    try:
+        while True:
+            msg = await ws.receive_text()
+            try:
+                payload = json.loads(msg)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") == "input":
+                data = payload.get("data", "")
+                channel.send(data)
+                # 명령 buffer
+                for ch in data:
+                    if ch in ("\r", "\n"):
+                        flush_cmd()
+                    else:
+                        cmd_buf.append(ch)
+            elif payload.get("type") == "resize":
+                cols = int(payload.get("cols") or 80)
+                rows = int(payload.get("rows") or 24)
+                try:
+                    channel.resize_pty(width=cols, height=rows)
+                except Exception:  # noqa: BLE001
+                    pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        closed = True
+        try:
+            channel.close()
+        except Exception:  # noqa: BLE001
+            pass
+        for c in clients:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        history_record(
+            settings.history_db, server=srv.name, mode="terminal_end",
+            command=f"session={session_id}", stderr="session closed",
+        )
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @app.get("/healthz")

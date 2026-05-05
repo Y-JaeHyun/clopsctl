@@ -148,6 +148,35 @@ def run(server: Server, command: str) -> ExecResult:
                 pass
 
 
+def open_shell(
+    server: Server,
+    inventory: dict[str, Server],
+    *,
+    term: str = "xterm-256color",
+    cols: int = 80,
+    rows: int = 24,
+) -> tuple[paramiko.Channel, list[paramiko.SSHClient]]:
+    """interactive PTY shell 채널 + 닫을 클라이언트 리스트 반환.
+
+    jump host 체인 자동 적용. 호출자는 결과 channel 로 send/recv 하고,
+    종료 시 모든 client 를 close 해야 한다.
+    """
+    chain = _resolve_jump_chain(server, inventory)
+    target_client, clients = _open_chain(chain)
+    transport = target_client.get_transport()
+    if transport is None:
+        for c in clients:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        raise RuntimeError(f"failed to acquire transport for {server.name}")
+    channel = transport.open_session()
+    channel.get_pty(term=term, width=cols, height=rows)
+    channel.invoke_shell()
+    return channel, clients
+
+
 def fan_out(
     servers: list[Server],
     command: str,

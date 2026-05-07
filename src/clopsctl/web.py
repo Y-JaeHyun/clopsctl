@@ -684,17 +684,20 @@ def terminal_page(name: str) -> str:
         f"<option value='{_e(s.name)}'>{_e(s.name)} — {_e(s.user)}@{_e(s.host)} ({_e(s.role)})</option>"
         for s in addable
     )
-    inv_rows = "".join(
-        (
+    def _row(s: Server) -> str:
+        muted_dash = "<span class='muted'>-</span>"
+        jump_cell = f"via <span class='badge jump'>{_e(s.jump)}</span>" if s.jump else muted_dash
+        tags_cell = ", ".join(_e(t) for t in s.tags) or muted_dash
+        return (
             f"<tr><td><b>{_e(s.name)}</b></td>"
             f"<td><code>{_e(s.host)}</code></td>"
             f"<td>{_e(s.user)}</td>"
             f"<td><span class='badge role-{_e(s.role)}'>{_e(s.role)}</span></td>"
-            f"<td>{('via <span class=\"badge jump\">' + _e(s.jump) + '</span>') if s.jump else '<span class=\"muted\">-</span>'}</td>"
-            f"<td>{', '.join(_e(t) for t in s.tags) or '<span class=\"muted\">-</span>'}</td></tr>"
+            f"<td>{jump_cell}</td>"
+            f"<td>{tags_cell}</td></tr>"
         )
-        for s in inventory.values()
-    )
+
+    inv_rows = "".join(_row(s) for s in inventory.values())
 
     # 시작 panel = path 의 server
     initial_panel_json = json.dumps([srv.name])

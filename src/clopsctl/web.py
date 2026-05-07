@@ -190,6 +190,33 @@ a:hover { color: var(--accent-hover); }
 .error-list ul { margin: .25rem 0 0 1rem; padding: 0; }
 .turn-prior { background: #fafbfc; }
 .turn-prior h2 { color: #6b7280; }
+
+/* multi-pane terminal */
+.term-toolbar { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; padding: .65rem .75rem; background: #f9fafb; border: 1px solid var(--border); border-radius: 6px; margin-bottom: .9rem; }
+.term-toolbar select, .term-toolbar input[type=text] { padding: .35rem .55rem; border: 1px solid var(--border); border-radius: 5px; font-size: .85rem; }
+.term-toolbar .spacer { flex: 1; }
+.term-toolbar .toggle { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; user-select: none; font-size: .85rem; padding: .25rem .55rem; border: 1px solid var(--border); border-radius: 5px; background: white; }
+.term-toolbar .toggle.on { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
+.term-shortcuts { font-size: .75rem; color: var(--muted); padding: 0 .25rem .5rem; }
+.term-shortcuts kbd { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 0 .35rem; font-family: ui-monospace, monospace; font-size: .7rem; }
+.term-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: .8rem; }
+.term-grid.broadcast .term-pane { box-shadow: 0 0 0 2px #fdba74 inset; }
+.term-pane { background: #0b1220; border: 2px solid #1f2937; border-radius: 8px; padding: .35rem .45rem .45rem; display: flex; flex-direction: column; min-height: 360px; cursor: pointer; transition: border-color .12s; }
+.term-pane.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(37,99,235,.18); }
+.term-pane-head { display: flex; align-items: center; gap: .5rem; padding: .25rem .25rem .35rem; color: #cbd5e1; font-size: .78rem; font-family: ui-monospace, monospace; }
+.term-pane-head .name { font-weight: 600; color: #e2e8f0; }
+.term-pane-head .meta { color: #94a3b8; }
+.term-pane-head .spacer { flex: 1; }
+.term-pane-head .pane-status { font-size: .7rem; padding: 0 .35rem; border-radius: 3px; background: #1e293b; }
+.term-pane-head .pane-status.ok { background: #064e3b; color: #6ee7b7; }
+.term-pane-head .pane-status.err { background: #7f1d1d; color: #fecaca; }
+.term-pane-head button { background: transparent; border: 1px solid #334155; color: #cbd5e1; border-radius: 4px; padding: 0 .45rem; font-size: .7rem; cursor: pointer; }
+.term-pane-head button:hover { background: #1e293b; color: white; }
+.term-pane-body { flex: 1; min-height: 280px; }
+.term-inv-table { font-size: .8rem; }
+.term-inv-table td, .term-inv-table th { padding: .25rem .5rem; }
+.broadcast-banner { display: none; padding: .35rem .65rem; background: #fff7ed; border: 1px solid #fdba74; color: #c2410c; border-radius: 5px; font-size: .8rem; margin-bottom: .8rem; font-weight: 500; }
+.term-grid.broadcast ~ .broadcast-banner, body.broadcast-on .broadcast-banner { display: block; }
 """
 
 
@@ -643,77 +670,243 @@ def terminal_page(name: str) -> str:
         )
         return _layout("clopsctl — terminal blocked", body)
 
-    # 추가 CSS — xterm 컨테이너 풀 사이즈
+    # shell/sudo role 인 서버만 추가 후보
+    addable = [s for s in inventory.values() if s.role in ("shell", "sudo")]
+    add_options = "".join(
+        f"<option value='{_e(s.name)}'>{_e(s.name)} — {_e(s.user)}@{_e(s.host)} ({_e(s.role)})</option>"
+        for s in addable
+    )
+    inv_rows = "".join(
+        (
+            f"<tr><td><b>{_e(s.name)}</b></td>"
+            f"<td><code>{_e(s.host)}</code></td>"
+            f"<td>{_e(s.user)}</td>"
+            f"<td><span class='badge role-{_e(s.role)}'>{_e(s.role)}</span></td>"
+            f"<td>{('via <span class=\"badge jump\">' + _e(s.jump) + '</span>') if s.jump else '<span class=\"muted\">-</span>'}</td>"
+            f"<td>{', '.join(_e(t) for t in s.tags) or '<span class=\"muted\">-</span>'}</td></tr>"
+        )
+        for s in inventory.values()
+    )
+
+    # 시작 panel = path 의 server
+    initial_panel_json = json.dumps([srv.name])
+
     body = f"""
+    <link rel='stylesheet' href='{XTERM_CDN_CSS}'>
+
     <section class='card'>
       <div class='section-head'>
-        <h2>터미널 — <code>{_e(srv.name)}</code> <span class='muted' style='font-weight:normal'>· {_e(srv.user)}@{_e(srv.host)}{':' + str(srv.port) if srv.port != 22 else ''}{' via ' + _e(srv.jump) if srv.jump else ''}</span></h2>
-        <a href='/' class='btn-link'>닫기</a>
+        <h2>인벤토리</h2>
+        <a href='/' class='btn-link'>← 홈</a>
       </div>
-      <div class='kv'>
-        role: <span class='badge role-{_e(srv.role)}'>{_e(srv.role)}</span>
-        &nbsp;·&nbsp; <span id='conn-status' class='muted'>연결 중…</span>
-      </div>
-      <link rel='stylesheet' href='{XTERM_CDN_CSS}'>
-      <div id='term' style='height:520px;background:#0b1220;border-radius:6px;padding:.5rem;'></div>
-      <p class='muted' style='font-size:.78rem;margin-top:.5rem'>
-        세션 시작/종료, Enter 까지 입력된 명령이 history(<code>mode=terminal*</code>)에 기록됩니다.
-        브라우저 탭을 닫으면 세션도 종료됩니다.
-      </p>
+      <table class='dense term-inv-table'>
+        <thead><tr><th>name</th><th>host</th><th>user</th><th>role</th><th>jump</th><th>tags</th></tr></thead>
+        <tbody>{inv_rows}</tbody>
+      </table>
     </section>
+
+    <section class='card'>
+      <h2>터미널 (다중 세션)</h2>
+
+      <div class='term-toolbar'>
+        <span class='muted'>+ 추가:</span>
+        <select id='add-select'>{add_options}</select>
+        <button type='button' class='btn-link btn-primary' id='add-btn'>panel 추가</button>
+        <span class='spacer'></span>
+        <label class='toggle' id='broadcast-toggle' title='켜진 panel 모두에 동시 입력'>
+          <input type='checkbox' id='broadcast-cb' style='accent-color:#c2410c'>
+          <span>Broadcast</span>
+        </label>
+      </div>
+
+      <div class='broadcast-banner' id='broadcast-banner'>
+        ⚡ Broadcast 모드 — 입력이 열린 모든 세션에 동시 전송됩니다.
+      </div>
+
+      <div class='term-shortcuts'>
+        단축키: <kbd>클릭</kbd> 활성화 ·
+        <kbd>Alt</kbd>+<kbd>1</kbd>..<kbd>9</kbd> 직접 선택 ·
+        <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 이전/다음 ·
+        <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 도 동일 ·
+        활성 panel 은 파란 테두리, broadcast 시 amber 외곽선
+      </div>
+
+      <div id='term-grid' class='term-grid'></div>
+    </section>
+
     <script src='{XTERM_CDN_JS}'></script>
     <script src='{XTERM_FIT_CDN}'></script>
     <script>
     (function() {{
-      var term = new Terminal({{
-        cursorBlink: true,
-        fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
-        fontSize: 13,
-        theme: {{ background: '#0b1220', foreground: '#e2e8f0', cursor: '#60a5fa' }},
-      }});
-      var fit = new FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open(document.getElementById('term'));
-      try {{ fit.fit(); }} catch (e) {{}}
-      var status = document.getElementById('conn-status');
-      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      var ws = new WebSocket(proto + '//' + location.host + '/ws/terminal/{_e(srv.name)}');
-      ws.onopen = function() {{
-        status.textContent = '연결됨';
-        status.className = '';
-        status.style.color = 'var(--ok)';
-        sendResize();
-      }};
-      ws.onmessage = function(ev) {{
-        if (typeof ev.data === 'string') {{
-          term.write(ev.data);
-        }} else {{
-          ev.data.text().then(function(t) {{ term.write(t); }});
-        }}
-      }};
-      ws.onclose = function(ev) {{
-        status.textContent = '종료됨' + (ev.reason ? ' — ' + ev.reason : '');
-        status.style.color = 'var(--muted)';
-        term.write('\\r\\n[연결 종료]\\r\\n');
-      }};
-      ws.onerror = function() {{
-        status.textContent = '오류';
-        status.style.color = 'var(--err)';
-      }};
-      term.onData(function(data) {{
-        if (ws.readyState === 1) ws.send(JSON.stringify({{type: 'input', data: data}}));
-      }});
-      function sendResize() {{
-        if (ws.readyState !== 1) return;
-        ws.send(JSON.stringify({{type: 'resize', cols: term.cols, rows: term.rows}}));
+      var WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var grid = document.getElementById('term-grid');
+      var addSelect = document.getElementById('add-select');
+      var addBtn = document.getElementById('add-btn');
+      var broadcastCb = document.getElementById('broadcast-cb');
+      var broadcastBanner = document.getElementById('broadcast-banner');
+
+      var panels = [];
+      var activeIdx = -1;
+
+      function setActive(idx) {{
+        if (idx < 0 || idx >= panels.length) return;
+        activeIdx = idx;
+        panels.forEach(function(p, i) {{
+          if (i === idx) {{
+            p.el.classList.add('active');
+            try {{ p.term.focus(); }} catch (e) {{}}
+          }} else {{
+            p.el.classList.remove('active');
+          }}
+        }});
       }}
-      window.addEventListener('resize', function() {{
+
+      function setBroadcast(on) {{
+        if (on) {{
+          grid.classList.add('broadcast');
+          broadcastBanner.style.display = 'block';
+          document.getElementById('broadcast-toggle').classList.add('on');
+        }} else {{
+          grid.classList.remove('broadcast');
+          broadcastBanner.style.display = 'none';
+          document.getElementById('broadcast-toggle').classList.remove('on');
+        }}
+      }}
+      broadcastCb.addEventListener('change', function() {{ setBroadcast(broadcastCb.checked); }});
+
+      function addPanel(name) {{
+        // panel 컨테이너
+        var el = document.createElement('div');
+        el.className = 'term-pane';
+        var head = document.createElement('div');
+        head.className = 'term-pane-head';
+        head.innerHTML = '<span class=\"name\"></span> <span class=\"meta\"></span>'
+                       + '<span class=\"spacer\"></span>'
+                       + '<span class=\"pane-status\">connecting…</span> '
+                       + '<button type=\"button\" class=\"close-btn\" title=\"세션 종료\">✕</button>';
+        head.querySelector('.name').textContent = name;
+        var body_el = document.createElement('div');
+        body_el.className = 'term-pane-body';
+        el.appendChild(head); el.appendChild(body_el);
+        grid.appendChild(el);
+
+        // xterm
+        var term = new Terminal({{
+          cursorBlink: true,
+          fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+          fontSize: 13,
+          theme: {{ background: '#0b1220', foreground: '#e2e8f0', cursor: '#60a5fa' }},
+        }});
+        var fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(body_el);
         try {{ fit.fit(); }} catch (e) {{}}
-        sendResize();
+
+        var ws = new WebSocket(WS_PROTO + '//' + location.host + '/ws/terminal/' + encodeURIComponent(name));
+        var statusEl = head.querySelector('.pane-status');
+        var metaEl = head.querySelector('.meta');
+
+        var panel = {{ name: name, el: el, term: term, fit: fit, ws: ws }};
+        panels.push(panel);
+        var myIdx = panels.length - 1;
+
+        ws.onopen = function() {{
+          statusEl.textContent = 'connected';
+          statusEl.className = 'pane-status ok';
+          sendResize();
+        }};
+        ws.onmessage = function(ev) {{
+          if (typeof ev.data === 'string') term.write(ev.data);
+          else ev.data.text().then(function(t) {{ term.write(t); }});
+        }};
+        ws.onclose = function(ev) {{
+          statusEl.textContent = 'closed' + (ev.reason ? ' — ' + ev.reason : '');
+          statusEl.className = 'pane-status err';
+          term.write('\\r\\n[연결 종료]\\r\\n');
+        }};
+        ws.onerror = function() {{
+          statusEl.textContent = 'error';
+          statusEl.className = 'pane-status err';
+        }};
+
+        term.onData(function(data) {{
+          if (broadcastCb.checked) {{
+            panels.forEach(function(p) {{
+              if (p.ws.readyState === 1) p.ws.send(JSON.stringify({{type: 'input', data: data}}));
+            }});
+          }} else {{
+            if (ws.readyState === 1) ws.send(JSON.stringify({{type: 'input', data: data}}));
+          }}
+        }});
+
+        function sendResize() {{
+          if (ws.readyState !== 1) return;
+          ws.send(JSON.stringify({{type: 'resize', cols: term.cols, rows: term.rows}}));
+        }}
+        panel.sendResize = sendResize;
+
+        // 클릭 시 활성화
+        el.addEventListener('mousedown', function() {{ setActive(panels.indexOf(panel)); }});
+        // 닫기
+        head.querySelector('.close-btn').addEventListener('click', function(e) {{
+          e.stopPropagation();
+          try {{ ws.close(); }} catch (err) {{}}
+          try {{ term.dispose(); }} catch (err) {{}}
+          var idx = panels.indexOf(panel);
+          if (idx >= 0) panels.splice(idx, 1);
+          el.remove();
+          // 활성 재조정
+          if (panels.length === 0) {{ activeIdx = -1; return; }}
+          setActive(Math.min(myIdx, panels.length - 1));
+        }});
+
+        setActive(myIdx);
+        return panel;
+      }}
+
+      // 추가 버튼
+      addBtn.addEventListener('click', function() {{
+        var name = addSelect.value;
+        if (name) addPanel(name);
+      }});
+
+      // 키보드 단축키
+      window.addEventListener('keydown', function(ev) {{
+        // Alt + 1..9 → panel 직접 선택
+        if (ev.altKey && !ev.ctrlKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {{
+          var idx = parseInt(ev.key, 10) - 1;
+          if (idx < panels.length) {{
+            setActive(idx);
+            ev.preventDefault();
+          }}
+          return;
+        }}
+        // Alt + ←/→  또는  Ctrl+Shift+←/→  → prev/next
+        var leftish = ev.key === 'ArrowLeft';
+        var rightish = ev.key === 'ArrowRight';
+        var altLR = ev.altKey && (leftish || rightish);
+        var ctrlShiftLR = ev.ctrlKey && ev.shiftKey && (leftish || rightish);
+        if ((altLR || ctrlShiftLR) && panels.length > 0) {{
+          var step = leftish ? -1 : 1;
+          var nxt = (activeIdx + step + panels.length) % panels.length;
+          setActive(nxt);
+          ev.preventDefault();
+        }}
+      }});
+
+      // 페이지 resize 시 모든 panel fit
+      window.addEventListener('resize', function() {{
+        panels.forEach(function(p) {{
+          try {{ p.fit.fit(); p.sendResize(); }} catch (e) {{}}
+        }});
       }});
       window.addEventListener('beforeunload', function() {{
-        try {{ ws.close(); }} catch (e) {{}}
+        panels.forEach(function(p) {{ try {{ p.ws.close(); }} catch (e) {{}} }});
       }});
+
+      // 초기 panel
+      var initial = {initial_panel_json};
+      initial.forEach(function(n) {{ addPanel(n); }});
     }})();
     </script>
     """

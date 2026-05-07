@@ -109,21 +109,39 @@ def client(workspace) -> TestClient:
     return TestClient(web.app)
 
 
-def test_terminal_page_renders_for_shell_role(client):
+def test_terminal_page_renders_multi_pane_for_shell_role(client):
     resp = client.get("/terminal/app-shell")
     assert resp.status_code == 200
     body = resp.text
-    assert "터미널" in body
-    assert "app-shell" in body
-    assert "ws/terminal/app-shell" in body
+    # multi-pane core 마크업
+    assert "터미널 (다중 세션)" in body
+    assert "id='term-grid'" in body
+    assert "id='broadcast-cb'" in body
+    assert "id='add-select'" in body
+    assert "id='add-btn'" in body
+    # 단축키 안내
+    assert "Alt" in body
+    # 초기 panel 으로 path 의 server
+    assert '["app-shell"]' in body
+    # 인벤토리 사이드 카드 — 모든 server 노출
+    assert "app-shell" in body and "web-readonly" in body and "bastion" in body
+    # 추가 후보 select 에는 read-only 제외
+    add_select_section = body.split("id='add-select'", 1)[1].split("</select>", 1)[0]
+    assert "app-shell" in add_select_section
+    assert "private" in add_select_section
+    assert "bastion" in add_select_section
+    assert "web-readonly" not in add_select_section  # read-only 차단
     # xterm.js CDN
     assert "xterm" in body and ".min.js" in body
 
 
-def test_terminal_page_renders_for_sudo_role_with_jump(client):
+def test_terminal_page_inventory_table_shows_jump(client):
     resp = client.get("/terminal/private")
-    assert resp.status_code == 200
-    assert "via bastion" in resp.text
+    body = resp.text
+    # 인벤토리 표에 jump 배지로 표시
+    assert "<span class=\"badge jump\">bastion</span>" in body
+    # 초기 panel 은 private
+    assert '["private"]' in body
 
 
 def test_terminal_page_blocked_for_read_only(client):

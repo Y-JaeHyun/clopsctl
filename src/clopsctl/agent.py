@@ -20,7 +20,7 @@ from typing import Callable
 
 from rich.console import Console
 
-from .config import Server, Settings
+from .config import Server, Settings, load_inventory
 from .history import record
 from .llm import LLMBackend
 from .permissions import is_allowed_for_role, strictest_role
@@ -142,6 +142,21 @@ def _record_block(db_path, server: str, command: str, prompt: str, reason: str) 
     )
 
 
+def _collect_jumps(server: Server, full_inv: dict[str, Server]) -> list[Server]:
+    """server 의 jump 체인을 따라가며 bastion 노드들을 모은다 (target 자신은 제외)."""
+    hops: list[Server] = []
+    seen: set[str] = {server.name}
+    cur = server
+    while cur.jump and cur.jump not in seen:
+        nxt = full_inv.get(cur.jump)
+        if nxt is None:
+            break
+        hops.append(nxt)
+        seen.add(nxt.name)
+        cur = nxt
+    return hops
+
+
 EventCallback = Callable[[dict[str, Any]], None]
 
 
@@ -160,6 +175,7 @@ def _execute_plan(
     console: Console,
     dry_run: bool = False,
     on_event: EventCallback | None = None,
+    allowed_names: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     results: list[dict[str, Any]] = []
     n_blocked = 0
@@ -195,7 +211,10 @@ def _execute_plan(
             _emit(on_event, "step_failed", step=idx, reason="malformed step", command=command)
             continue
 
-        unknown = [n for n in names if n not in inventory]
+        # unknown / 비허가 검증: bastion 은 inventory 에 들어있어도 사용자가
+        # 선택하지 않았으면 LLM 이 직접 명령 대상으로 삼을 수는 없도록 차단.
+        check_set = allowed_names if allowed_names is not None else set(inventory)
+        unknown = [n for n in names if n not in check_set]
         if unknown:
             results.append({"error": f"unknown servers: {unknown}", "command": command})
             n_failed += 1
@@ -295,6 +314,16 @@ def ask(
     prior_turns 가 있으면 이전 대화 (질문/답변) 를 LLM 프롬프트에 포함해 follow-up 처리.
     """
     inventory = {s.name: s for s in targets}
+    # jump host 해석용으로 인벤토리에 없는 bastion 까지 포함시킨다.
+    # 선택된 targets 검증 (unknown 체크) 은 별도 set 로 처리.
+    selected_names = set(inventory)
+    try:
+        full_inv = load_inventory(settings.inventory_path)
+    except Exception:  # noqa: BLE001
+        full_inv = {}
+    for srv in targets:
+        for hop in _collect_jumps(srv, full_inv):
+            inventory.setdefault(hop.name, hop)
     history_text = _format_history(prior_turns)
 
     _emit(on_event, "started", backend=backend.name, dry_run=dry_run, servers=[s.name for s in targets])
@@ -318,6 +347,7 @@ def ask(
         results, n_blocked, n_failed = _execute_plan(
             steps, inventory=inventory, settings=settings, prompt=prompt,
             console=console, dry_run=True, on_event=on_event,
+            allowed_names=selected_names,
         )
         plan_summary = "\n".join(
             f"- {s.get('servers', [s.get('server')])} :: {s.get('command')}" for s in steps
@@ -336,6 +366,7 @@ def ask(
     results, n_blocked, n_failed = _execute_plan(
         steps, inventory=inventory, settings=settings, prompt=prompt,
         console=console, on_event=on_event,
+        allowed_names=selected_names,
     )
 
     summary_prompt = SUMMARIZE_INSTRUCTION.format(

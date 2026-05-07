@@ -7,6 +7,10 @@ secrets/
 *.key
 *.ppk
 
+# 인벤토리 (실제 호스트/계정 정보) — example 만 커밋
+inventory/*.toml
+!inventory/*.example.toml
+
 # 로컬 데이터
 history/*.sqlite
 history/*.db

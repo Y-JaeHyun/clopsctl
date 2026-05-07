@@ -199,9 +199,13 @@ a:hover { color: var(--accent-hover); }
 .term-toolbar .toggle.on { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
 .term-shortcuts { font-size: .75rem; color: var(--muted); padding: 0 .25rem .5rem; }
 .term-shortcuts kbd { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 0 .35rem; font-family: ui-monospace, monospace; font-size: .7rem; }
-.term-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: .8rem; }
+.term-grid { display: grid; grid-template-columns: 1fr; gap: .8rem; }
+.term-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.term-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.term-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+.term-grid.cols-auto { grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); }
 .term-grid.broadcast .term-pane { box-shadow: 0 0 0 2px #fdba74 inset; }
-.term-pane { background: #0b1220; border: 2px solid #1f2937; border-radius: 8px; padding: .35rem .45rem .45rem; display: flex; flex-direction: column; min-height: 360px; cursor: pointer; transition: border-color .12s; }
+.term-pane { background: #0b1220; border: 2px solid #1f2937; border-radius: 8px; padding: .35rem .45rem .45rem; display: flex; flex-direction: column; min-height: 460px; cursor: pointer; transition: border-color .12s; resize: vertical; overflow: auto; }
 .term-pane.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(37,99,235,.18); }
 .term-pane-head { display: flex; align-items: center; gap: .5rem; padding: .25rem .25rem .35rem; color: #cbd5e1; font-size: .78rem; font-family: ui-monospace, monospace; }
 .term-pane-head .name { font-weight: 600; color: #e2e8f0; }
@@ -217,16 +221,20 @@ a:hover { color: var(--accent-hover); }
 .term-inv-table td, .term-inv-table th { padding: .25rem .5rem; }
 .broadcast-banner { display: none; padding: .35rem .65rem; background: #fff7ed; border: 1px solid #fdba74; color: #c2410c; border-radius: 5px; font-size: .8rem; margin-bottom: .8rem; font-weight: 500; }
 .term-grid.broadcast ~ .broadcast-banner, body.broadcast-on .broadcast-banner { display: block; }
+
+/* 터미널 페이지 — 브라우저 전체 폭 사용 */
+body.term-fullwidth main.container { max-width: none; padding-left: 1rem; padding-right: 1rem; }
 """
 
 
-def _layout(title: str, body: str) -> str:
+def _layout(title: str, body: str, body_class: str = "") -> str:
+    cls_attr = f" class='{_e(body_class)}'" if body_class else ""
     return f"""<!doctype html>
 <html lang='ko'><head>
   <meta charset='utf-8'>
   <title>{_e(title)}</title>
   <style>{_PAGE_CSS}</style>
-</head><body>
+</head><body{cls_attr}>
   <header class='topbar'>
     <span class='brand'><span class='dot'></span>clopsctl <span class='ver'>v{_e(__version__)}</span></span>
     <nav class='nav'>
@@ -712,6 +720,14 @@ def terminal_page(name: str) -> str:
         <span class='muted'>+ 추가:</span>
         <select id='add-select'>{add_options}</select>
         <button type='button' class='btn-link btn-primary' id='add-btn'>panel 추가</button>
+        <span class='muted' style='margin-left:.5rem'>한 행:</span>
+        <select id='cols-select' title='한 행에 표시할 panel 수'>
+          <option value='1' selected>1 (전체 폭)</option>
+          <option value='2'>2</option>
+          <option value='3'>3</option>
+          <option value='4'>4</option>
+          <option value='auto'>auto (480px 자동 wrap)</option>
+        </select>
         <span class='spacer'></span>
         <label class='toggle' id='broadcast-toggle' title='켜진 panel 모두에 동시 입력'>
           <input type='checkbox' id='broadcast-cb' style='accent-color:#c2410c'>
@@ -742,8 +758,21 @@ def terminal_page(name: str) -> str:
       var grid = document.getElementById('term-grid');
       var addSelect = document.getElementById('add-select');
       var addBtn = document.getElementById('add-btn');
+      var colsSelect = document.getElementById('cols-select');
       var broadcastCb = document.getElementById('broadcast-cb');
       var broadcastBanner = document.getElementById('broadcast-banner');
+
+      // 행당 panel 수 설정
+      function applyCols(value) {{
+        ['cols-2','cols-3','cols-4','cols-auto'].forEach(function(c) {{ grid.classList.remove(c); }});
+        if (value === 'auto') grid.classList.add('cols-auto');
+        else if (value !== '1') grid.classList.add('cols-' + value);
+        // 모든 panel fit 재계산
+        setTimeout(function() {{
+          panels.forEach(function(p) {{ try {{ p.fit.fit(); p.sendResize(); }} catch (e) {{}} }});
+        }}, 50);
+      }}
+      colsSelect.addEventListener('change', function() {{ applyCols(colsSelect.value); }});
 
       var panels = [];
       var activeIdx = -1;
@@ -845,6 +874,15 @@ def terminal_page(name: str) -> str:
         }}
         panel.sendResize = sendResize;
 
+        // panel 자체 크기 변화 (CSS resize handle, grid 재계산 등) 감지 → xterm fit 자동
+        if (typeof ResizeObserver !== 'undefined') {{
+          var ro = new ResizeObserver(function() {{
+            try {{ fit.fit(); sendResize(); }} catch (e) {{}}
+          }});
+          ro.observe(el);
+          panel.ro = ro;
+        }}
+
         // 클릭 시 활성화
         el.addEventListener('mousedown', function() {{ setActive(panels.indexOf(panel)); }});
         // 닫기
@@ -852,6 +890,7 @@ def terminal_page(name: str) -> str:
           e.stopPropagation();
           try {{ ws.close(); }} catch (err) {{}}
           try {{ term.dispose(); }} catch (err) {{}}
+          try {{ if (panel.ro) panel.ro.disconnect(); }} catch (err) {{}}
           var idx = panels.indexOf(panel);
           if (idx >= 0) panels.splice(idx, 1);
           el.remove();
@@ -910,7 +949,7 @@ def terminal_page(name: str) -> str:
     }})();
     </script>
     """
-    return _layout(f"clopsctl — terminal {name}", body)
+    return _layout(f"clopsctl — terminal {name}", body, body_class="term-fullwidth")
 
 
 def _terminal_bridge_loop(channel, ws_send_bytes, on_close):

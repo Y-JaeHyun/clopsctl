@@ -144,6 +144,36 @@ def test_terminal_page_inventory_table_shows_jump(client):
     assert '["private"]' in body
 
 
+def test_terminal_page_uses_full_width_body_class(client):
+    resp = client.get("/terminal/app-shell")
+    body = resp.text
+    # 터미널 페이지는 브라우저 전체 폭 사용 (max-width override)
+    assert "<body class='term-fullwidth'>" in body
+    # CSS 도 함께 노출
+    assert "body.term-fullwidth main.container" in body
+
+
+def test_terminal_page_has_column_count_selector(client):
+    resp = client.get("/terminal/app-shell")
+    body = resp.text
+    # 한 행 열 수 select 존재 (1/2/3/4/auto)
+    assert "id='cols-select'" in body
+    assert "1 (전체 폭)" in body
+    assert "value='auto'" in body
+    # 기본값 1 (selected)
+    section = body.split("id='cols-select'", 1)[1].split("</select>", 1)[0]
+    assert "value='1' selected" in section
+
+
+def test_terminal_page_panel_resize_css(client):
+    resp = client.get("/terminal/app-shell")
+    body = resp.text
+    # panel 에 resize: vertical 적용 — 사용자가 세로 크기 조정 가능
+    assert "resize: vertical" in body
+    # ResizeObserver JS 도 임베드
+    assert "ResizeObserver" in body
+
+
 def test_terminal_page_blocked_for_read_only(client):
     resp = client.get("/terminal/web-readonly")
     assert resp.status_code == 200

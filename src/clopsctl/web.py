@@ -6,17 +6,21 @@ ask 폼은 SSH 명령을 실행하므로 GET 금지, POST 만 허용.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from rich.console import Console
 
 from . import __version__
@@ -29,6 +33,40 @@ from .llm import list_backends, select_backend
 from .ssh import open_shell
 
 app = FastAPI(title="clopsctl", version=__version__)
+
+# --- 정적 자산 (vendored xterm.js — CDN 의존 제거, 폐쇄망/오프라인 지원) -------
+# jsdelivr CDN 대신 로컬 서빙 + Subresource Integrity(SRI) 로 공급망 변조 방지.
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _sri_hash(rel_path: str) -> str:
+    """vendored 자산의 sha384 SRI 문자열 ('sha384-<base64>') 계산.
+
+    서빙되는 실제 파일 바이트에서 계산하므로 integrity 속성이 항상 파일과 일치한다.
+    파일이 없으면 빈 문자열 — integrity 속성을 생략해 페이지는 계속 동작한다.
+    """
+    fp = STATIC_DIR / rel_path
+    try:
+        digest = hashlib.sha384(fp.read_bytes()).digest()
+    except OSError:
+        return ""
+    return "sha384-" + base64.b64encode(digest).decode("ascii")
+
+
+# import 시 1회 계산 (작은 파일들, 시작 비용 무시 가능).
+_SRI = {
+    "xterm.js": _sri_hash("vendor/xterm.min.js"),
+    "xterm.css": _sri_hash("vendor/xterm.min.css"),
+    "fit": _sri_hash("vendor/xterm-addon-fit.min.js"),
+    "search": _sri_hash("vendor/xterm-addon-search.min.js"),
+}
+
+
+def _sri_attr(key: str) -> str:
+    """integrity + crossorigin 속성 문자열. 해시 계산 실패 시 빈 문자열."""
+    h = _SRI.get(key) or ""
+    return f" integrity='{h}' crossorigin='anonymous'" if h else ""
 
 
 # --- in-memory job 관리 (단일 프로세스 가정) ----------------------------------
@@ -207,6 +245,9 @@ a:hover { color: var(--accent-hover); }
 .term-toolbar .spacer { flex: 1; }
 .term-toolbar .toggle { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; user-select: none; font-size: .85rem; padding: .25rem .55rem; border: 1px solid var(--border); border-radius: 5px; background: white; }
 .term-toolbar .toggle.on { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
+.term-search { display: inline-flex; align-items: center; gap: .25rem; }
+.term-search input[type=text] { width: 11rem; }
+.term-search .btn-link { padding: .25rem .5rem; }
 .term-shortcuts { font-size: .75rem; color: var(--muted); padding: 0 .25rem .5rem; }
 .term-shortcuts kbd { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 0 .35rem; font-family: ui-monospace, monospace; font-size: .7rem; }
 .term-grid { display: grid; grid-template-columns: 1fr; gap: .8rem; }
@@ -1013,9 +1054,21 @@ def fleet_page() -> str:
 
 # --- Interactive SSH terminal (xterm.js + WebSocket + paramiko PTY) ----------
 
-XTERM_CDN_JS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
-XTERM_CDN_CSS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
-XTERM_FIT_CDN = "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
+def _tmux_session_name(server_name: str) -> str:
+    """server name → 안전한 tmux 세션명 'clopsctl-<safe>'.
+
+    tmux 세션명에서 문제되는 문자(`.`, `:`, 공백 등)를 `_` 로 치환한다.
+    server name 규칙은 영숫자/_/-/. 를 허용하므로 `.` 만 실질적으로 치환된다.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in server_name)
+    return f"clopsctl-{safe}"
+
+
+# vendored 로컬 자산 (JAE-109: CDN 제거). 버전: xterm 5.3.0 / fit 0.8.0 / search 0.13.0.
+XTERM_JS = "/static/vendor/xterm.min.js"
+XTERM_CSS = "/static/vendor/xterm.min.css"
+XTERM_FIT_JS = "/static/vendor/xterm-addon-fit.min.js"
+XTERM_SEARCH_JS = "/static/vendor/xterm-addon-search.min.js"
 
 
 @app.get("/terminal/{name}", response_class=HTMLResponse)
@@ -1060,7 +1113,7 @@ def terminal_page(name: str) -> str:
     initial_panel_json = json.dumps([srv.name])
 
     body = f"""
-    <link rel='stylesheet' href='{XTERM_CDN_CSS}'>
+    <link rel='stylesheet' href='{XTERM_CSS}'{_sri_attr('xterm.css')}>
 
     <section class='card'>
       <div class='section-head'>
@@ -1088,6 +1141,11 @@ def terminal_page(name: str) -> str:
           <option value='4'>4</option>
           <option value='auto'>auto (480px 자동 wrap)</option>
         </select>
+        <span class='term-search'>
+          <input type='text' id='search-input' placeholder='활성 panel 검색…' title='Ctrl+Shift+F'>
+          <button type='button' class='btn-link' id='search-prev' title='이전 (Shift+Enter)'>↑</button>
+          <button type='button' class='btn-link' id='search-next' title='다음 (Enter)'>↓</button>
+        </span>
         <span class='spacer'></span>
         <label class='toggle' id='broadcast-toggle' title='켜진 panel 모두에 동시 입력'>
           <input type='checkbox' id='broadcast-cb' style='accent-color:#c2410c'>
@@ -1110,8 +1168,9 @@ def terminal_page(name: str) -> str:
       <div id='term-grid' class='term-grid'></div>
     </section>
 
-    <script src='{XTERM_CDN_JS}'></script>
-    <script src='{XTERM_FIT_CDN}'></script>
+    <script src='{XTERM_JS}'{_sri_attr('xterm.js')}></script>
+    <script src='{XTERM_FIT_JS}'{_sri_attr('fit')}></script>
+    <script src='{XTERM_SEARCH_JS}'{_sri_attr('search')}></script>
     <script>
     (function() {{
       var WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1121,6 +1180,9 @@ def terminal_page(name: str) -> str:
       var colsSelect = document.getElementById('cols-select');
       var broadcastCb = document.getElementById('broadcast-cb');
       var broadcastBanner = document.getElementById('broadcast-banner');
+      var searchInput = document.getElementById('search-input');
+      var searchPrev = document.getElementById('search-prev');
+      var searchNext = document.getElementById('search-next');
 
       // 행당 panel 수 설정
       function applyCols(value) {{
@@ -1184,10 +1246,13 @@ def terminal_page(name: str) -> str:
           cursorBlink: true,
           fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
           fontSize: 13,
+          scrollback: 10000,
           theme: {{ background: '#0b1220', foreground: '#e2e8f0', cursor: '#60a5fa' }},
         }});
         var fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
+        var search = null;
+        try {{ search = new SearchAddon.SearchAddon(); term.loadAddon(search); }} catch (e) {{}}
         term.open(body_el);
         try {{ fit.fit(); }} catch (e) {{}}
 
@@ -1195,7 +1260,7 @@ def terminal_page(name: str) -> str:
         var statusEl = head.querySelector('.pane-status');
         var metaEl = head.querySelector('.meta');
 
-        var panel = {{ name: name, el: el, term: term, fit: fit, ws: ws }};
+        var panel = {{ name: name, el: el, term: term, fit: fit, ws: ws, search: search }};
         panels.push(panel);
         var myIdx = panels.length - 1;
 
@@ -1269,8 +1334,33 @@ def terminal_page(name: str) -> str:
         if (name) addPanel(name);
       }});
 
+      // 검색 — 활성 panel 의 scrollback 을 대상으로 함
+      function runSearch(forward) {{
+        if (activeIdx < 0 || activeIdx >= panels.length) return;
+        var p = panels[activeIdx];
+        var q = searchInput.value;
+        if (!p.search || !q) return;
+        try {{
+          if (forward) p.search.findNext(q);
+          else p.search.findPrevious(q);
+        }} catch (e) {{}}
+      }}
+      searchNext.addEventListener('click', function() {{ runSearch(true); }});
+      searchPrev.addEventListener('click', function() {{ runSearch(false); }});
+      searchInput.addEventListener('keydown', function(ev) {{
+        if (ev.key === 'Enter') {{ runSearch(!ev.shiftKey); ev.preventDefault(); }}
+        else if (ev.key === 'Escape') {{ searchInput.value = ''; searchInput.blur(); }}
+      }});
+
       // 키보드 단축키
       window.addEventListener('keydown', function(ev) {{
+        // Ctrl+Shift+F → 검색창 포커스
+        if (ev.ctrlKey && ev.shiftKey && (ev.key === 'F' || ev.key === 'f')) {{
+          searchInput.focus();
+          searchInput.select();
+          ev.preventDefault();
+          return;
+        }}
         // Alt + 1..9 → panel 직접 선택
         if (ev.altKey && !ev.ctrlKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {{
           var idx = parseInt(ev.key, 10) - 1;
@@ -1374,6 +1464,15 @@ async def terminal_ws(ws: WebSocket, name: str) -> None:
             )
             await ws.close(code=4500, reason="connect failed")
         return
+
+    # tmux 세션 지속성 (JAE-109): tmux=true 서버는 접속 즉시 tmux 세션에 attach.
+    # 끊겨도 세션이 살아있어 재접속 시 진행 중 작업이 그대로 보존된다.
+    # tmux 미설치 시 "command not found" 후 일반 셸로 떨어짐 — 그래도 동작은 한다.
+    if srv.tmux:
+        try:
+            channel.send(f" tmux new-session -A -s {_tmux_session_name(srv.name)}\n")
+        except Exception:  # noqa: BLE001
+            pass  # best-effort — 주입 실패해도 일반 셸은 유지
 
     closed = False
 
@@ -1521,6 +1620,7 @@ def _server_form_html(
     role_v = s.role if s else "read-only"
     tags_v = ", ".join(s.tags) if s and s.tags else ""
     jump_v = s.jump or "" if s else ""
+    tmux_checked = " checked" if (s and s.tmux) else ""
 
     auth_opts = "".join(
         f"<option value='{a}'{' selected' if a == auth_v else ''}>{a}</option>"
@@ -1614,6 +1714,14 @@ def _server_form_html(
         <div class='row'>
           <label class='label-block'>tags <span class='muted'>(콤마 구분)</span></label>
           <input type='text' name='tags' value='{_e(tags_v)}' placeholder='prod, web, kr'>
+        </div>
+
+        <div class='row'>
+          <label class='toggle' style='display:inline-flex;align-items:center;gap:.4rem;cursor:pointer'>
+            <input type='checkbox' name='tmux' value='true'{tmux_checked}>
+            <span>tmux 세션 지속성</span>
+          </label>
+          <p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>웹 터미널 접속 시 <code>tmux new -A -s clopsctl-{_e(name_v) or "&lt;name&gt;"}</code> 자동 attach. 끊겨도 세션 유지 (원격에 tmux 설치 필요).</p>
         </div>
 
         <div class='row'>

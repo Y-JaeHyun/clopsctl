@@ -120,6 +120,7 @@ ruff check .
 - [x] Phase 3-e: 인벤토리 CRUD web UI (모든 Server 필드 폼 + jump 드롭다운 + cycle 검증)
 - [x] Phase 4-a: 대화형 follow-up (Conversation, prior_turns, 이전 turn 카드 누적)
 - [x] Phase 4-b: 인터랙티브 SSH 터미널 UI (xterm.js + WebSocket + paramiko PTY, role gate, 명령 buffer 기록, 다중 세션)
+- [x] Phase 4-b-3: 터미널 강화 (JAE-109) — tmux 세션 지속성(인벤토리 `tmux=true`), xterm.js 로컬 vendoring + SRI(CDN 의존 제거), 스크롤백 10k + 검색 addon
 - [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
 
 ## 라이선스

@@ -37,3 +37,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 런타임 PID/로그
+.run/

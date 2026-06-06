@@ -54,11 +54,28 @@
 
 ## 검증 매트릭스 (2026-04 기준)
 
-| 환경 | 단위 테스트 | exec 스모크 | ask 스모크 | web SSE |
-| --- | --- | --- | --- | --- |
-| Ubuntu 22.04 + Python 3.12 | ✅ | ✅ | ✅ | ✅ |
-| macOS 14 (arm64) | 미검증 | 미검증 | 미검증 | 미검증 |
-| Windows 11 (WSL2) | 미검증 (Linux와 동일 예상) | — | — | — |
-| Windows 11 native | 미검증 | — | — | — |
+| 환경 | 단위 테스트 | exec 스모크 | ask 스모크 | web SSE | install/start/stop |
+| --- | --- | --- | --- | --- | --- |
+| Ubuntu 22.04 + Python 3.12 | ✅ | ✅ | ✅ | ✅ | ✅ (JAE-107) |
+| macOS 14 (arm64) | 미검증 | 미검증 | 미검증 | 미검증 | 미검증 (스크립트는 portable 작성) |
+| Windows 11 (WSL2) | 미검증 (Linux와 동일 예상) | — | — | — | 미검증 (Linux와 동일 예상) |
+| Windows 11 native | 미검증 | — | — | — | 미지원 (.sh — WSL2 권장) |
 
 호환성 검증 결과는 PR 또는 issue 로 본 표를 갱신해 주시면 좋겠습니다.
+
+## 빠른 시작 스크립트 (JAE-107)
+
+`scripts/install.sh`, `bin/clopsctl-start.sh`, `bin/clopsctl-stop.sh` 는 macOS / Linux 공용으로
+작성했다 (검증된 portability 포인트):
+
+- `#!/usr/bin/env bash`, bash 3.2 호환 (macOS 기본 셸) — 연관배열·`${var,,}` 등 bash4 기능 미사용
+- 스크립트 루트 해석에 `readlink -f` (macOS 미지원) 대신 `cd "$(dirname …)" && pwd` 사용
+- 포트 점검은 `lsof`(mac/linux 공통) 우선, 없으면 venv python 소켓 fallback
+- `chmod` 실패는 경고만 (Windows/특수 FS 대비), venv 경로는 `bin/`·`Scripts/` 양쪽 탐색
+
+**Linux(Ubuntu 22.04, Python 3.12) 실검증 완료** — install → start(HTTP 200) → idempotent
+재기동 → 포트 충돌 감지 → `--restart` → graceful stop 전 경로 통과.
+
+**macOS 실검증은 Mac 하드웨어 필요로 미완료** — 위 매트릭스의 macOS install/start/stop 칸은
+실제 Mac 에서 1회 스모크 후 PR/issue 로 갱신 필요. 부팅 자동 기동은 [service.md](service.md) 의
+launchd LaunchAgent 템플릿 참고.

@@ -36,6 +36,13 @@ class Job:
     queue: Queue = field(default_factory=Queue)
     started_at: float = field(default_factory=time.monotonic)
     done: bool = False
+    # fleet 대시보드용 메타 (어떤 run 이 무슨 서버에서 도는지 한눈에 보기)
+    targets: list[str] = field(default_factory=list)
+    prompt: str = ""
+    backend_name: str = ""
+    dry_run: bool = False
+    created_wall: float = field(default_factory=time.time)
+    result: dict[str, Any] | None = None  # 완료 시 {n_steps,n_blocked,n_failed} 기록
 
 
 JOBS: dict[str, Job] = {}
@@ -224,6 +231,75 @@ a:hover { color: var(--accent-hover); }
 
 /* 터미널 페이지 — 브라우저 전체 폭 사용 */
 body.term-fullwidth main.container { max-width: none; padding-left: 1rem; padding-right: 1rem; }
+
+/* ask step 타임라인 (Plan→Execute→Summarize 시각화) */
+.timeline { list-style: none; margin: 0 0 1rem; padding: 0; display: flex; flex-wrap: wrap; gap: .5rem; }
+.timeline .phase {
+  flex: 1; min-width: 150px; border: 1px solid var(--border); border-radius: 8px;
+  padding: .6rem .75rem; background: var(--surface); transition: border-color .15s, background .15s;
+}
+.timeline .phase .phase-name { font-weight: 600; font-size: .82rem; display: flex; align-items: center; gap: .4rem; }
+.timeline .phase .phase-name .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); flex: none; }
+.timeline .phase .phase-meta { font-size: .72rem; color: var(--muted); margin-top: .25rem; min-height: 1em; }
+.timeline .phase.active { border-color: var(--accent); background: rgba(37,99,235,.06); }
+.timeline .phase.active .phase-name .dot { background: var(--accent); animation: pulse 1.1s infinite; }
+.timeline .phase.done { border-color: var(--ok); }
+.timeline .phase.done .phase-name .dot { background: var(--ok); }
+.timeline .phase.err { border-color: var(--err); }
+.timeline .phase.err .phase-name .dot { background: var(--err); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.step-list { margin: 0; padding: 0; list-style: none; }
+.step-list .step { display: flex; gap: .5rem; padding: .35rem .5rem; border-bottom: 1px dashed var(--border); font-size: .82rem; align-items: baseline; }
+.step-list .step:last-child { border-bottom: 0; }
+.step-list .step .st-icon { width: 1.2em; flex: none; }
+.step-list .step.ok .st-icon { color: var(--ok); }
+.step-list .step.err .st-icon { color: var(--err); }
+.step-list .step.blocked .st-icon { color: var(--warn); }
+details.raw-log summary { cursor: pointer; font-size: .8rem; color: var(--muted); margin-top: .6rem; }
+
+/* fleet runs 대시보드 (In-progress / Ready 보드) */
+.board { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.board-col h3 { display: flex; align-items: center; gap: .4rem; }
+.board-col .count { background: var(--code-bg); color: var(--muted); border-radius: 999px; padding: 0 .5rem; font-size: .72rem; }
+.run-card { border: 1px solid var(--border); border-left: 3px solid var(--muted); border-radius: 8px; padding: .65rem .8rem; margin-bottom: .7rem; background: var(--surface); }
+.run-card.running { border-left-color: var(--accent); }
+.run-card.ok { border-left-color: var(--ok); }
+.run-card.warn { border-left-color: var(--warn); }
+.run-card .run-head { display: flex; align-items: center; gap: .5rem; font-size: .8rem; }
+.run-card .run-head .spacer { flex: 1; }
+.run-card .run-prompt { font-size: .82rem; margin: .35rem 0; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-card .run-meta { font-size: .72rem; color: var(--muted); }
+.filter-bar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end; }
+.filter-bar > div { display: flex; flex-direction: column; gap: .2rem; }
+.filter-bar label { font-size: .75rem; color: var(--muted); }
+.filter-bar input, .filter-bar select { padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: .85rem; }
+
+/* 다크모드 — html[data-theme='dark'] (토글, localStorage 영속) */
+html[data-theme='dark'] {
+  --bg: #0d1117; --surface: #161b22; --border: #2b313b; --text: #e6edf3;
+  --muted: #8b949e; --accent: #4493f8; --accent-hover: #6aa8ff;
+  --ok: #3fb950; --warn: #d29922; --err: #f85149; --code-bg: #1c2128;
+  color-scheme: dark;
+}
+html[data-theme='dark'] table th { background: #1c2128; color: var(--text); }
+html[data-theme='dark'] form textarea,
+html[data-theme='dark'] form input[type='text'],
+html[data-theme='dark'] form input[type='number'],
+html[data-theme='dark'] form select,
+html[data-theme='dark'] .filter-bar input,
+html[data-theme='dark'] .filter-bar select { background: #0d1117; color: var(--text); }
+html[data-theme='dark'] form .checkbox-group label { background: #1c2128; }
+html[data-theme='dark'] form .checkbox-group label:hover { background: #21262d; }
+html[data-theme='dark'] .btn-link { background: #1c2128; color: var(--text); }
+html[data-theme='dark'] .btn-link:hover { background: #21262d; color: var(--text); }
+html[data-theme='dark'] .panel { background: #12161c; }
+html[data-theme='dark'] .panel.ok { background: #0f1f15; }
+html[data-theme='dark'] .panel.warn { background: #211c10; }
+html[data-theme='dark'] .panel.err { background: #211615; }
+html[data-theme='dark'] .turn-prior, html[data-theme='dark'] .term-toolbar { background: #12161c; }
+html[data-theme='dark'] .banner { background: #211c10; border-color: #3b3115; color: #e3b341; }
+.theme-toggle { background: transparent; border: 1px solid #334155; color: #cbd5e1; border-radius: 5px; padding: .2rem .55rem; font-size: .8rem; cursor: pointer; }
+.theme-toggle:hover { background: rgba(255,255,255,.08); color: white; }
 """
 
 
@@ -233,13 +309,20 @@ def _layout(title: str, body: str, body_class: str = "") -> str:
 <html lang='ko'><head>
   <meta charset='utf-8'>
   <title>{_e(title)}</title>
+  <script>
+  (function(){{try{{var t=localStorage.getItem('clopsctl-theme');if(t!=='dark'&&t!=='light'){{t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}}document.documentElement.setAttribute('data-theme',t);}}catch(e){{}}}})();
+  function clopsToggleTheme(){{var h=document.documentElement;var n=h.getAttribute('data-theme')==='dark'?'light':'dark';h.setAttribute('data-theme',n);try{{localStorage.setItem('clopsctl-theme',n);}}catch(e){{}}}}
+  </script>
   <style>{_PAGE_CSS}</style>
 </head><body{cls_attr}>
   <header class='topbar'>
     <span class='brand'><span class='dot'></span>clopsctl <span class='ver'>v{_e(__version__)}</span></span>
     <nav class='nav'>
       <a href='/'>Home</a>
+      <a href='/fleet'>Fleet</a>
+      <a href='/history'>History</a>
       <a href='/healthz'>Health</a>
+      <button type='button' class='theme-toggle' onclick='clopsToggleTheme()' title='다크/라이트 전환'>🌓 테마</button>
     </nav>
   </header>
   <main class='container'>
@@ -372,7 +455,10 @@ def index() -> str:
     </section>
 
     <section class='card'>
-      <h2>Recent history <span class='muted' style='font-weight:normal'>(last 20)</span></h2>
+      <div class='section-head'>
+        <h2>Recent history <span class='muted' style='font-weight:normal'>(last 20)</span></h2>
+        <a href='/history' class='btn-link'>전체 검색 / 필터 →</a>
+      </div>
       <table class='dense'><thead><tr>
         <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
       </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
@@ -421,6 +507,11 @@ def _run_ask_job(
                 }
             )
     finally:
+        job.result = {
+            "n_steps": captured["n_steps"],
+            "n_blocked": captured["n_blocked"],
+            "n_failed": captured["n_failed"],
+        }
         emit({"type": "_eof"})
         job.done = True
 
@@ -485,7 +576,13 @@ def ask_post(
         CONVERSATIONS[conv.id] = conv
     prior_turns = list(conv.turns)  # 시작 시점 snapshot
 
-    job = Job(id=uuid.uuid4().hex)
+    job = Job(
+        id=uuid.uuid4().hex,
+        targets=list(targets),
+        prompt=prompt,
+        backend_name=sel_backend.name,
+        dry_run=is_dry,
+    )
     JOBS[job.id] = job
 
     Thread(
@@ -525,7 +622,13 @@ def ask_post(
       <h3>프롬프트</h3>
       <pre>{_e(prompt)}</pre>
       <h3>진행 <span class='muted' id='status-badge' style='font-weight:normal'>· 시작 중…</span></h3>
-      <div id='log'></div>
+      <ol class='timeline'>
+        <li class='phase' id='ph-plan'><div class='phase-name'><span class='dot'></span>Plan</div><div class='phase-meta' id='ph-plan-meta'>대기</div></li>
+        <li class='phase' id='ph-exec'><div class='phase-name'><span class='dot'></span>Execute</div><div class='phase-meta' id='ph-exec-meta'>대기</div></li>
+        <li class='phase' id='ph-sum'><div class='phase-name'><span class='dot'></span>Summarize</div><div class='phase-meta' id='ph-sum-meta'>대기</div></li>
+      </ol>
+      <ul class='step-list' id='steps'></ul>
+      <details class='raw-log'><summary>원시 이벤트 로그 보기</summary><div id='log'></div></details>
       <h3 style='margin-top:1rem'>답변</h3>
       <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
     </section>
@@ -562,6 +665,26 @@ def ask_post(
         d.appendChild(document.createTextNode(s == null ? '' : String(s)));
         return d.innerHTML;
       }}
+      var stepsEl = document.getElementById('steps');
+      var execCount = 0;
+      function setPhase(id, state, meta) {{
+        var el = document.getElementById('ph-' + id);
+        if (el) el.className = 'phase' + (state ? ' ' + state : '');
+        var m = document.getElementById('ph-' + id + '-meta');
+        if (m && meta != null) m.textContent = meta;
+      }}
+      function addStep(icon, text, klass) {{
+        var li = document.createElement('li');
+        li.className = 'step ' + (klass || '');
+        li.innerHTML = '<span class="st-icon">' + icon + '</span><span>' + text + '</span>';
+        stepsEl.appendChild(li);
+      }}
+      function failActivePhase() {{
+        ['plan','exec','sum'].forEach(function(id) {{
+          var el = document.getElementById('ph-' + id);
+          if (el && el.classList.contains('active')) el.className = 'phase err';
+        }});
+      }}
       function enableFollowup() {{
         var card = document.getElementById('followup-card');
         var input = document.getElementById('followup-prompt');
@@ -578,35 +701,55 @@ def ask_post(
               statusBadge.textContent = '· 진행 중';
               appendRow('▸', 'started — backend <b>' + escapeHtml(e.backend) + '</b>'); break;
             case 'plan_start':
+              setPhase('plan', 'active', '계획 수립 중…');
               appendRow('…', 'planning'); break;
             case 'plan_done':
+              setPhase('plan', 'done', e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's') + ' 계획됨');
+              setPhase('exec', 'active', '실행 대기');
               appendRow('✓', 'plan ready (' + e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's') + ')', 'evt-ok'); break;
             case 'step_start':
+              addStep('→', '<b>' + escapeHtml((e.servers || []).join(', ')) + '</b> :: <code>' + escapeHtml(e.command) + '</code>');
               appendRow('→', '<b>' + escapeHtml((e.servers || []).join(', ')) + '</b> :: <code>' + escapeHtml(e.command) + '</code>');
               break;
             case 'step_result':
               var ok = e.exit_code === 0;
+              execCount++;
+              setPhase('exec', 'active', execCount + ' step 실행됨');
+              addStep(ok ? '✓' : '✗',
+                escapeHtml(e.server) + ' exit=' + escapeHtml(e.exit_code) +
+                (e.stdout_preview ? ' <span class="muted">— ' + escapeHtml(e.stdout_preview.split('\\n')[0].slice(0, 80)) + '</span>' : ''),
+                ok ? 'ok' : 'err');
               appendRow(ok ? '✓' : '✗',
                 escapeHtml(e.server) + ' exit=' + escapeHtml(e.exit_code) +
                 (e.stdout_preview ? ' <span class="muted">— ' + escapeHtml(e.stdout_preview.split('\\n')[0].slice(0, 80)) + '</span>' : ''),
                 ok ? 'evt-ok' : 'evt-failed'); break;
             case 'step_blocked':
+              addStep('⊘', 'blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>', 'blocked');
               appendRow('⊘', 'blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>', 'evt-blocked'); break;
             case 'step_failed':
+              addStep('✗', 'failed — ' + escapeHtml(e.reason), 'err');
               appendRow('✗', 'failed — ' + escapeHtml(e.reason), 'evt-failed'); break;
             case 'step_dry_run':
+              execCount++;
+              setPhase('exec', 'active', execCount + ' step (dry-run)');
+              addStep('∘', 'dry-run: <code>' + escapeHtml(e.command) + '</code>');
               appendRow('∘', 'dry-run: <code>' + escapeHtml(e.command) + '</code>'); break;
             case 'summarize_start':
+              setPhase('exec', 'done', execCount + ' step 완료');
+              setPhase('sum', 'active', '요약 생성 중…');
               appendRow('…', 'summarizing'); break;
             case 'done':
               answer.innerHTML = '<pre>' + escapeHtml(e.final_text) + '</pre>';
               answer.classList.add(e.n_failed === 0 && e.n_blocked === 0 ? 'ok' : 'warn');
+              setPhase('exec', 'done', e.n_steps + ' step · blocked ' + e.n_blocked + ' · failed ' + e.n_failed);
+              setPhase('sum', e.n_failed === 0 ? 'done' : 'err', '완료');
               appendRow('✓', '<b>done</b> — steps=' + e.n_steps + ' blocked=' + e.n_blocked + ' failed=' + e.n_failed, 'evt-ok');
               statusBadge.textContent = '· 완료';
               enableFollowup(); break;
             case 'error':
               answer.innerHTML = '<pre>error: ' + escapeHtml(e.message) + '</pre>';
               answer.classList.add('err');
+              failActivePhase();
               appendRow('✗', '<b>error</b> — ' + escapeHtml(e.message), 'evt-failed');
               statusBadge.textContent = '· 에러';
               enableFollowup(); break;
@@ -652,6 +795,217 @@ def ask_stream(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# --- History 검색/필터 페이지 -------------------------------------------------
+
+_HISTORY_MODES = ("exec", "ask", "terminal_start", "terminal", "terminal_end")
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page(q: str = "", server: str = "", mode: str = "", limit: int = 50) -> str:
+    """히스토리 웹 검색/필터 — 서버·모드·키워드(grep)로 좁혀 조회."""
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    limit = max(1, min(limit, 500))
+
+    rows = search(
+        settings.history_db,
+        server=server or None,
+        mode=mode or None,
+        grep=q.strip() or None,
+        limit=limit,
+    )
+
+    server_opts = "<option value=''>(전체 서버)</option>" + "".join(
+        f"<option value='{_e(name)}'{' selected' if name == server else ''}>{_e(name)}</option>"
+        for name in inventory
+    )
+    mode_opts = "<option value=''>(전체 모드)</option>" + "".join(
+        f"<option value='{_e(m)}'{' selected' if m == mode else ''}>{_e(m)}</option>"
+        for m in _HISTORY_MODES
+    )
+
+    body = f"""
+    <section class='card'>
+      <div class='section-head'><h2>History 검색</h2>
+        <span class='muted'>{len(rows)} 건 · 최대 {limit}</span>
+      </div>
+      <form method='GET' action='/history' class='filter-bar'>
+        <div style='flex:2; min-width:220px'>
+          <label for='q'>키워드 (command / prompt / stdout)</label>
+          <input type='text' id='q' name='q' value='{_e(q)}' placeholder='예) disk, systemctl…'>
+        </div>
+        <div>
+          <label for='server'>서버</label>
+          <select id='server' name='server'>{server_opts}</select>
+        </div>
+        <div>
+          <label for='mode'>모드</label>
+          <select id='mode' name='mode'>{mode_opts}</select>
+        </div>
+        <div>
+          <label for='limit'>limit</label>
+          <input type='number' id='limit' name='limit' value='{limit}' min='1' max='500' style='width:6rem'>
+        </div>
+        <div><button type='submit' class='btn-link btn-primary' style='padding:.45rem .9rem'>검색</button></div>
+        <div><a href='/history' class='btn-link'>초기화</a></div>
+      </form>
+    </section>
+
+    <section class='card'>
+      <table class='dense'><thead><tr>
+        <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
+      </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
+    </section>
+    """
+    return _layout("clopsctl — history", body)
+
+
+# --- Fleet runs 대시보드 (superset.sh식 In-progress / Ready 보드) -------------
+
+def _fleet_runs_payload() -> dict[str, list[dict[str, Any]]]:
+    """현재/최근 ask run 스냅샷 — fleet 대시보드 폴링용."""
+    now = time.time()
+    running: list[dict[str, Any]] = []
+    recent: list[dict[str, Any]] = []
+    for job in JOBS.values():
+        item = {
+            "id": job.id,
+            "targets": job.targets,
+            "prompt": job.prompt[:160],
+            "backend": job.backend_name,
+            "dry_run": job.dry_run,
+            "elapsed": round(max(0.0, now - job.created_wall), 1),
+            "done": job.done,
+            "result": job.result,
+        }
+        (recent if job.done else running).append(item)
+    running.sort(key=lambda x: x["elapsed"])
+    recent.sort(key=lambda x: x["elapsed"])
+    return {"running": running, "recent": recent}
+
+
+def _fleet_server_summary(db_path, inventory: dict[str, Server]) -> list[dict[str, Any]]:
+    """서버별 히스토리 집계 (총 실행/실패/최근 활동)."""
+    rows = search(db_path, limit=1000)
+    agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        a = agg.setdefault(r["server"], {"server": r["server"], "runs": 0, "failed": 0, "last_ts": ""})
+        a["runs"] += 1
+        ec = r["exit_code"]
+        if isinstance(ec, int) and ec != 0:
+            a["failed"] += 1
+        if r["ts"] > a["last_ts"]:
+            a["last_ts"] = r["ts"]
+    for name in inventory:
+        agg.setdefault(name, {"server": name, "runs": 0, "failed": 0, "last_ts": ""})
+    return sorted(agg.values(), key=lambda x: (-x["runs"], x["server"]))
+
+
+@app.get("/fleet/runs")
+def fleet_runs() -> dict[str, list[dict[str, Any]]]:
+    _cleanup_old_jobs()
+    return _fleet_runs_payload()
+
+
+@app.get("/fleet", response_class=HTMLResponse)
+def fleet_page() -> str:
+    """fleet 대시보드 — '지금 무엇이 돌고 있나' 한눈에 보기."""
+    _cleanup_old_jobs()
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    summary = _fleet_server_summary(settings.history_db, inventory)
+
+    if summary:
+        parts = []
+        for s in summary:
+            if s["failed"]:
+                failed_cell = f"<span class='badge role-sudo'>{_e(s['failed'])}</span>"
+            else:
+                failed_cell = "<span class='muted'>0</span>"
+            last_ts = s["last_ts"][:19] or "—"
+            parts.append(
+                f"<tr><td><b>{_e(s['server'])}</b></td>"
+                f"<td>{_e(s['runs'])}</td>"
+                f"<td>{failed_cell}</td>"
+                f"<td class='muted'>{_e(last_ts)}</td></tr>"
+            )
+        summary_rows = "".join(parts)
+    else:
+        summary_rows = "<tr><td colspan='4' class='muted'><i>(히스토리 없음)</i></td></tr>"
+
+    body = f"""
+    <section class='card'>
+      <div class='section-head'>
+        <h2>Fleet runs <span class='muted' style='font-weight:normal'>· ask 실행 보드</span></h2>
+        <span class='muted' id='fleet-updated'>3초마다 자동 새로고침</span>
+      </div>
+      <div class='board'>
+        <div class='board-col'>
+          <h3>In-progress <span class='count' id='cnt-running'>0</span></h3>
+          <div id='col-running'><p class='muted'><i>로딩…</i></p></div>
+        </div>
+        <div class='board-col'>
+          <h3>Ready / 완료 <span class='count' id='cnt-recent'>0</span></h3>
+          <div id='col-recent'><p class='muted'><i>로딩…</i></p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class='card'>
+      <h2>서버별 활동 <span class='muted' style='font-weight:normal'>(history 집계)</span></h2>
+      <table class='dense fleet-summary'><thead><tr>
+        <th>server</th><th>runs</th><th>failed</th><th>last activity (UTC)</th>
+      </tr></thead><tbody>{summary_rows}</tbody></table>
+    </section>
+
+    <script>
+    (function() {{
+      function escapeHtml(s) {{
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s == null ? '' : String(s)));
+        return d.innerHTML;
+      }}
+      function fmtElapsed(s) {{
+        if (s < 60) return Math.round(s) + 's';
+        var m = Math.floor(s / 60); return m + 'm ' + Math.round(s % 60) + 's';
+      }}
+      function runCard(r, running) {{
+        var warn = r.result && ((r.result.n_failed || 0) > 0 || (r.result.n_blocked || 0) > 0);
+        var cls = running ? 'running' : (warn ? 'warn' : 'ok');
+        var status = running
+          ? '<b style="color:var(--accent)">● 진행 중</b>'
+          : (warn ? '<b style="color:var(--warn)">⚠ 완료</b>' : '<b style="color:var(--ok)">✓ 완료</b>');
+        var res = r.result
+          ? (' · steps ' + r.result.n_steps + ' · blocked ' + r.result.n_blocked + ' · failed ' + r.result.n_failed)
+          : '';
+        var tgt = escapeHtml((r.targets || []).join(', ')) || '<span class="muted">(no target)</span>';
+        return '<div class="run-card ' + cls + '">'
+          + '<div class="run-head">' + status + '<span class="spacer"></span><span class="run-meta">' + fmtElapsed(r.elapsed) + '</span></div>'
+          + '<div class="run-prompt">' + (escapeHtml(r.prompt) || '<span class="muted">(빈 프롬프트)</span>') + '</div>'
+          + '<div class="run-meta">' + tgt + ' · ' + escapeHtml(r.backend) + (r.dry_run ? ' · dry-run' : '') + res + '</div>'
+          + '</div>';
+      }}
+      function renderCol(id, items, running) {{
+        var el = document.getElementById(id);
+        if (!items.length) {{ el.innerHTML = '<p class="muted"><i>(없음)</i></p>'; return; }}
+        el.innerHTML = items.map(function(r) {{ return runCard(r, running); }}).join('');
+      }}
+      function refresh() {{
+        fetch('/fleet/runs').then(function(r) {{ return r.json(); }}).then(function(d) {{
+          document.getElementById('cnt-running').textContent = d.running.length;
+          document.getElementById('cnt-recent').textContent = d.recent.length;
+          renderCol('col-running', d.running, true);
+          renderCol('col-recent', d.recent, false);
+        }}).catch(function() {{}});
+      }}
+      refresh();
+      setInterval(refresh, 3000);
+    }})();
+    </script>
+    """
+    return _layout("clopsctl — fleet", body)
 
 
 # --- Interactive SSH terminal (xterm.js + WebSocket + paramiko PTY) ----------

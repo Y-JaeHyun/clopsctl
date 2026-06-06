@@ -35,12 +35,27 @@ def test_write_inventory_round_trip(tmp_path):
     assert loaded["private-app"].pem_path is None
 
 
+def test_write_inventory_tmux_round_trip(tmp_path):
+    """tmux 플래그가 TOML 왕복에서 보존된다 (JAE-109)."""
+    p = tmp_path / "servers.toml"
+    write_inventory(p, {
+        "t": Server(name="t", host="h", user="u", role="shell", tmux=True),
+        "n": Server(name="n", host="h", user="u", role="shell"),
+    })
+    text = p.read_text()
+    assert "tmux = true" in text
+    loaded = load_inventory(p)
+    assert loaded["t"].tmux is True
+    assert loaded["n"].tmux is False  # 기본값 — 직렬화에서 생략
+
+
 def test_write_inventory_omits_empty_optional_fields(tmp_path):
     p = tmp_path / "servers.toml"
     s = Server(name="a", host="h", user="u")
     write_inventory(p, {"a": s})
     text = p.read_text()
     assert "pem_path" not in text
+    assert "tmux" not in text
     assert "password_env" not in text
     assert "tags" not in text
     assert "jump" not in text
@@ -123,6 +138,21 @@ def test_post_servers_creates_new_entry(client, workspace):
     assert "db-stage" in inv
     assert inv["db-stage"].tags == ("stage", "db")
     assert inv["db-stage"].jump is None
+    assert inv["db-stage"].tmux is False  # 체크박스 미전송 → 기본 off
+
+
+def test_post_servers_tmux_checkbox_persisted(client, workspace):
+    """폼의 tmux 체크박스가 인벤토리에 저장된다 (JAE-109)."""
+    resp = client.post(
+        "/servers",
+        data={
+            "name": "tmux-host", "host": "10.0.2.20", "user": "ops", "port": "22",
+            "auth": "agent", "role": "shell", "tags": "", "jump": "", "tmux": "true",
+        },
+    )
+    assert resp.status_code == 200
+    inv = load_inventory(workspace / "servers.toml")
+    assert inv["tmux-host"].tmux is True
 
 
 def test_post_servers_duplicate_name_shows_error(client):

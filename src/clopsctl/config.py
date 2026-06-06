@@ -36,6 +36,7 @@ class Server:
     role: RoleMode = "read-only"
     tags: tuple[str, ...] = field(default_factory=tuple)
     jump: str | None = None  # 다른 server name 참조 (bastion). 최대 1단계 chain (총 2 hop)
+    tmux: bool = False  # True 면 웹 터미널 접속 시 tmux 세션 자동 attach (세션 지속성)
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,6 +86,7 @@ def load_inventory(path: Path) -> dict[str, Server]:
             role=cfg.get("role", "read-only"),
             tags=tuple(cfg.get("tags", [])),
             jump=cfg.get("jump"),
+            tmux=bool(cfg.get("tmux", False)),
         )
     return servers
 
@@ -106,6 +108,8 @@ def server_to_dict(s: Server) -> dict[str, object]:
         out["tags"] = list(s.tags)
     if s.jump:
         out["jump"] = s.jump
+    if s.tmux:
+        out["tmux"] = True
     return out
 
 
@@ -157,6 +161,7 @@ def validate_server_input(
     role = (form.get("role") or "read-only").strip()
     tags_raw = (form.get("tags") or "").strip()
     jump = (form.get("jump") or "").strip() or None
+    tmux = (form.get("tmux") or "").strip().lower() in ("true", "on", "1", "yes")
 
     if not name:
         errors.append("name 이 비어있습니다.")
@@ -202,7 +207,7 @@ def validate_server_input(
     server = Server(
         name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
         pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
-        tags=tags, jump=jump,
+        tags=tags, jump=jump, tmux=tmux,
     )
 
     # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출

@@ -20,10 +20,13 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from rich.console import Console
 
 from . import __version__
+from .config import VALID_AUTH as _VALID_AUTH
+from .config import VALID_ROLE as _VALID_ROLE
 from .config import Server, load_inventory, load_settings, write_inventory
+from .config import validate_server_input as _validate_server_input
 from .history import record as history_record, search
 from .llm import list_backends, select_backend
-from .ssh import _resolve_jump_chain, open_shell
+from .ssh import open_shell
 
 app = FastAPI(title="clopsctl", version=__version__)
 
@@ -1144,12 +1147,6 @@ def healthz() -> dict[str, object]:
 
 # --- 인벤토리 CRUD --------------------------------------------------------------
 
-import re as _re
-
-_NAME_RE = _re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
-_VALID_AUTH = ("agent", "pem", "password")
-_VALID_ROLE = ("read-only", "shell", "sudo")
-
 
 def _server_form_html(
     *,
@@ -1272,84 +1269,6 @@ def _server_form_html(
       </form>
     </section>
     """
-
-
-def _validate_server_input(
-    form: dict[str, str],
-    inventory: dict[str, Server],
-    *,
-    is_edit: bool,
-) -> tuple[Server | None, list[str]]:
-    """폼 dict 를 검증하고 (Server | None, errors) 반환."""
-    errors: list[str] = []
-    name = (form.get("name") or "").strip()
-    host = (form.get("host") or "").strip()
-    user = (form.get("user") or "").strip()
-    port_raw = (form.get("port") or "22").strip()
-    auth = (form.get("auth") or "agent").strip()
-    pem_path = (form.get("pem_path") or "").strip() or None
-    password_env = (form.get("password_env") or "").strip() or None
-    role = (form.get("role") or "read-only").strip()
-    tags_raw = (form.get("tags") or "").strip()
-    jump = (form.get("jump") or "").strip() or None
-
-    if not name:
-        errors.append("name 이 비어있습니다.")
-    elif not _NAME_RE.match(name):
-        errors.append(f"name '{name}' 은 영숫자·_·-·. 만 허용합니다.")
-    elif not is_edit and name in inventory:
-        errors.append(f"name '{name}' 가 이미 존재합니다.")
-
-    if not host:
-        errors.append("host 가 비어있습니다.")
-    if not user:
-        errors.append("user 가 비어있습니다.")
-
-    try:
-        port = int(port_raw)
-        if not (1 <= port <= 65535):
-            raise ValueError
-    except ValueError:
-        errors.append(f"port '{port_raw}' 가 1-65535 범위를 벗어납니다.")
-        port = 22
-
-    if auth not in _VALID_AUTH:
-        errors.append(f"auth '{auth}' 는 {list(_VALID_AUTH)} 중 하나여야 합니다.")
-    if role not in _VALID_ROLE:
-        errors.append(f"role '{role}' 는 {list(_VALID_ROLE)} 중 하나여야 합니다.")
-
-    if auth == "pem" and not pem_path:
-        errors.append("auth=pem 인 경우 pem_path 가 필요합니다.")
-    if auth == "password" and not password_env:
-        errors.append("auth=password 인 경우 password_env (환경변수 이름) 가 필요합니다.")
-
-    tags: tuple[str, ...] = tuple(t.strip() for t in tags_raw.split(",") if t.strip())
-
-    if jump:
-        if jump == name:
-            errors.append("jump 가 자기 자신을 가리킵니다.")
-        elif jump not in inventory:
-            errors.append(f"jump '{jump}' 는 인벤토리에 없는 서버입니다.")
-
-    if errors:
-        return None, errors
-
-    server = Server(
-        name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
-        pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
-        tags=tags, jump=jump,
-    )
-
-    # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출
-    new_inv = dict(inventory)
-    new_inv[name] = server
-    try:
-        _resolve_jump_chain(server, new_inv)
-    except ValueError as exc:
-        errors.append(f"jump 검증 실패: {exc}")
-        return None, errors
-
-    return server, []
 
 
 @app.get("/servers/new", response_class=HTMLResponse)

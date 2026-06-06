@@ -34,6 +34,18 @@ pip install -e .
 
 ### 3. 설정
 
+가장 쉬운 방법은 대화형 마법사다. 로컬 AI CLI(claude/gemini/codex)가 있으면
+자연어 설명을 구조화해 인벤토리를 채우고, 없으면 순수 프롬프트 입력으로 폴백한다.
+
+```bash
+clopsctl init
+# 서버를 자연어로 설명 → 검증 → 미리보기 → servers.toml + .env 자동 생성 (chmod 600)
+# 미리보기만: clopsctl init --dry-run
+# AI 없이 직접 입력: clopsctl init --backend manual
+```
+
+수동 설정을 원하면 템플릿을 직접 복사한다:
+
 ```bash
 cp .env.example .env
 chmod 600 .env

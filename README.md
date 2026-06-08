@@ -12,6 +12,22 @@
 
 ## 빠른 시작
 
+### 0. 1커맨드 설치 (권장, macOS / Linux)
+
+```bash
+./scripts/install.sh          # venv 생성 + 의존성 설치 + .env/.toml 템플릿 복사 + 권한 강화
+./scripts/install.sh --dev    # 개발용 (pytest/ruff/mypy 포함)
+
+# 웹 UI 백그라운드 기동 / 종료 (PID·로그는 .run/ 에)
+./bin/clopsctl-start.sh       # nohup uvicorn, 포트 충돌 감지, idempotent (--restart 로 강제 재기동)
+./bin/clopsctl-stop.sh        # PID 파일 기반 graceful 종료
+```
+
+설치 후 `.env` 와 `inventory/servers.toml` 를 실제 값으로 편집한다.
+부팅 자동 기동·자동 재시작이 필요하면 [docs/service.md](docs/service.md) (systemd `--user` / launchd) 참고.
+
+아래는 수동 절차(스크립트 없이 직접 셋업할 때).
+
 ### 1. 사전 요건
 
 마스터 머신에 다음 중 **하나 이상**의 LLM CLI 가 설치·인증되어 있어야 합니다:
@@ -80,7 +96,8 @@ clopsctl history --server web-1
 clopsctl history --grep "디스크"
 
 # 웹 UI — 인벤토리/히스토리 조회 + ask 실행 폼 (반드시 localhost only)
-clopsctl web
+clopsctl web                    # 포그라운드 (Ctrl-C 종료)
+./bin/clopsctl-start.sh         # 또는 백그라운드 기동 (PID/로그는 .run/)
 # → http://127.0.0.1:8765
 #   - 서버 체크박스 + 프롬프트 + 백엔드 선택 + dry-run
 #   - POST /ask 로 실행 → 결과 페이지 렌더
@@ -121,7 +138,8 @@ ruff check .
 - [x] Phase 4-a: 대화형 follow-up (Conversation, prior_turns, 이전 turn 카드 누적)
 - [x] Phase 4-b: 인터랙티브 SSH 터미널 UI (xterm.js + WebSocket + paramiko PTY, role gate, 명령 buffer 기록, 다중 세션)
 - [x] Phase 4-b-3: 터미널 강화 (JAE-109) — tmux 세션 지속성(인벤토리 `tmux=true`), xterm.js 로컬 vendoring + SRI(CDN 의존 제거), 스크롤백 10k + 검색 addon
-- [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기)
+- [x] JAE-107: 부트스트랩(`scripts/install.sh`) + 백그라운드 start/stop 스크립트 + systemd/launchd 템플릿 (Linux 실검증)
+- [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기 — macOS install/start/stop 실검증 포함)
 
 ## 라이선스
 

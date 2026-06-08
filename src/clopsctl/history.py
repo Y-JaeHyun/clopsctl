@@ -121,6 +121,7 @@ def search(
     db_path: Path,
     *,
     server: str | None = None,
+    mode: str | None = None,
     grep: str | None = None,
     limit: int = 50,
 ) -> list[sqlite3.Row]:
@@ -131,6 +132,9 @@ def search(
     if server:
         where.append("server = ?")
         params.append(server)
+    if mode:
+        where.append("mode = ?")
+        params.append(mode)
     if grep:
         where.append("(command LIKE ? OR prompt LIKE ? OR stdout LIKE ?)")
         like = f"%{grep}%"

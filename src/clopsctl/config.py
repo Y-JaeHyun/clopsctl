@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,11 @@ from dotenv import load_dotenv
 AuthMode = Literal["pem", "password", "agent"]
 RoleMode = Literal["read-only", "shell", "sudo"]
 
+# 서버 입력 검증 규칙 — web 인벤토리 CRUD 와 `clopsctl init` 마법사가 공유.
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+VALID_AUTH = ("agent", "pem", "password")
+VALID_ROLE = ("read-only", "shell", "sudo")
+
 
 @dataclass(slots=True, frozen=True)
 class Server:
@@ -30,6 +36,7 @@ class Server:
     role: RoleMode = "read-only"
     tags: tuple[str, ...] = field(default_factory=tuple)
     jump: str | None = None  # 다른 server name 참조 (bastion). 최대 1단계 chain (총 2 hop)
+    tmux: bool = False  # True 면 웹 터미널 접속 시 tmux 세션 자동 attach (세션 지속성)
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,6 +86,7 @@ def load_inventory(path: Path) -> dict[str, Server]:
             role=cfg.get("role", "read-only"),
             tags=tuple(cfg.get("tags", [])),
             jump=cfg.get("jump"),
+            tmux=bool(cfg.get("tmux", False)),
         )
     return servers
 
@@ -100,6 +108,8 @@ def server_to_dict(s: Server) -> dict[str, object]:
         out["tags"] = list(s.tags)
     if s.jump:
         out["jump"] = s.jump
+    if s.tmux:
+        out["tmux"] = True
     return out
 
 
@@ -125,3 +135,136 @@ def write_inventory(path: Path, servers: dict[str, Server]) -> None:
     except OSError:
         pass  # Windows 등에서 chmod 무시
     tmp.replace(path)
+
+
+def validate_server_input(
+    form: dict[str, str],
+    inventory: dict[str, Server],
+    *,
+    is_edit: bool,
+) -> tuple[Server | None, list[str]]:
+    """폼 dict 를 검증하고 (Server | None, errors) 반환.
+
+    web 인벤토리 CRUD 와 `clopsctl init` 마법사가 공유하는 단일 검증 경로.
+    jump cycle / 깊이 검증은 ssh._resolve_jump_chain 을 재사용한다.
+    """
+    from .ssh import _resolve_jump_chain  # 지연 import — 순환 의존 방지
+
+    errors: list[str] = []
+    name = (form.get("name") or "").strip()
+    host = (form.get("host") or "").strip()
+    user = (form.get("user") or "").strip()
+    port_raw = (form.get("port") or "22").strip()
+    auth = (form.get("auth") or "agent").strip()
+    pem_path = (form.get("pem_path") or "").strip() or None
+    password_env = (form.get("password_env") or "").strip() or None
+    role = (form.get("role") or "read-only").strip()
+    tags_raw = (form.get("tags") or "").strip()
+    jump = (form.get("jump") or "").strip() or None
+    tmux = (form.get("tmux") or "").strip().lower() in ("true", "on", "1", "yes")
+
+    if not name:
+        errors.append("name 이 비어있습니다.")
+    elif not NAME_RE.match(name):
+        errors.append(f"name '{name}' 은 영숫자·_·-·. 만 허용합니다.")
+    elif not is_edit and name in inventory:
+        errors.append(f"name '{name}' 가 이미 존재합니다.")
+
+    if not host:
+        errors.append("host 가 비어있습니다.")
+    if not user:
+        errors.append("user 가 비어있습니다.")
+
+    try:
+        port = int(port_raw)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except ValueError:
+        errors.append(f"port '{port_raw}' 가 1-65535 범위를 벗어납니다.")
+        port = 22
+
+    if auth not in VALID_AUTH:
+        errors.append(f"auth '{auth}' 는 {list(VALID_AUTH)} 중 하나여야 합니다.")
+    if role not in VALID_ROLE:
+        errors.append(f"role '{role}' 는 {list(VALID_ROLE)} 중 하나여야 합니다.")
+
+    if auth == "pem" and not pem_path:
+        errors.append("auth=pem 인 경우 pem_path 가 필요합니다.")
+    if auth == "password" and not password_env:
+        errors.append("auth=password 인 경우 password_env (환경변수 이름) 가 필요합니다.")
+
+    tags: tuple[str, ...] = tuple(t.strip() for t in tags_raw.split(",") if t.strip())
+
+    if jump:
+        if jump == name:
+            errors.append("jump 가 자기 자신을 가리킵니다.")
+        elif jump not in inventory:
+            errors.append(f"jump '{jump}' 는 인벤토리에 없는 서버입니다.")
+
+    if errors:
+        return None, errors
+
+    server = Server(
+        name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
+        pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
+        tags=tags, jump=jump, tmux=tmux,
+    )
+
+    # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출
+    new_inv = dict(inventory)
+    new_inv[name] = server
+    try:
+        _resolve_jump_chain(server, new_inv)
+    except ValueError as exc:
+        errors.append(f"jump 검증 실패: {exc}")
+        return None, errors
+
+    return server, []
+
+
+def write_env(path: Path, values: dict[str, str], *, overwrite: bool = False) -> list[str]:
+    """KEY=VALUE 들을 .env 에 기록. 기본은 append-only (기존 키 보존).
+
+    - 파일이 없으면 안내 헤더와 함께 새로 생성.
+    - overwrite=False(기본): 이미 존재하는 키는 건드리지 않고, 없는 키만 추가.
+      비밀번호 등 사용자가 직접 채워둔 값을 덮어쓰지 않기 위함.
+    - 파일 권한 600 으로 설정.
+
+    반환: 실제로 추가된 키 목록.
+    """
+    existing_keys: set[str] = set()
+    lines: list[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for ln in lines:
+            stripped = ln.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                existing_keys.add(stripped.split("=", 1)[0].strip())
+    else:
+        lines = [
+            "# clopsctl 환경 변수 — `clopsctl init` 로 생성. 절대 커밋·업로드 금지.",
+            "",
+        ]
+
+    added: list[str] = []
+    appended: list[str] = []
+    for key, val in values.items():
+        if key in existing_keys and not overwrite:
+            continue
+        appended.append(f"{key}={val}")
+        added.append(key)
+
+    if appended:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend(appended)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass  # Windows 등에서 chmod 무시
+    tmp.replace(path)
+    return added

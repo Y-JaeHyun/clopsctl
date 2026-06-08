@@ -249,3 +249,67 @@ def test_ask_post_html_escapes_prompt(client, monkeypatch):
     # 페이지 안에 raw <img> 태그가 들어가면 안 됨 (escape 됐어야)
     assert "<img src=x onerror=" not in resp.text
     assert "&lt;img src=x onerror=" in resp.text
+
+
+# --- JAE-110: UX 최적화 (다크모드 / step 타임라인 / history 필터 / fleet 보드) -----
+
+def test_layout_has_dark_mode_toggle_and_nav(client):
+    """다크모드 토글 + Fleet/History 내비게이션이 모든 페이지 레이아웃에 노출."""
+    body = client.get("/").text
+    assert "data-theme" in body  # no-flash 초기화 스크립트
+    assert "clopsToggleTheme" in body  # 토글 함수
+    assert "clopsctl-theme" in body  # localStorage 영속
+    assert "href='/fleet'" in body and "href='/history'" in body
+
+
+def test_ask_page_renders_step_timeline(client, monkeypatch):
+    """ask 실행 페이지에 Plan→Execute→Summarize 타임라인 골격이 렌더된다."""
+    monkeypatch.setattr(web, "select_backend", lambda *_a, **_kw: _FakeBackend())
+    resp = client.post("/ask", data={"prompt": "hi", "targets": ["web-1"]})
+    assert resp.status_code == 200
+    body = resp.text
+    assert "class='timeline'" in body
+    for pid in ("ph-plan", "ph-exec", "ph-sum"):
+        assert f"id='{pid}'" in body
+    assert "setPhase" in body and "addStep" in body  # SSE 타임라인 구동 JS
+
+
+def test_history_page_renders_and_filters(client):
+    """history 페이지가 서버/모드/키워드 필터로 결과를 좁힌다."""
+    from clopsctl.config import load_settings
+    db = load_settings().history_db
+    from clopsctl.history import record
+    record(db, server="web-1", mode="exec", command="df -h", exit_code=0)
+    record(db, server="web-1", mode="exec", command="systemctl restart nginx", exit_code=1)
+    record(db, server="web-2", mode="ask", command="", prompt="disk usage check")
+
+    # 키워드 + 모드 필터: ask/disk 만 매칭, exec 행은 제외
+    resp = client.get("/history", params={"q": "disk", "mode": "ask"})
+    assert resp.status_code == 200
+    # 결과 테이블(tbody) 안에 exec 명령이 없어야 한다
+    tbody = resp.text.split("<tbody>")[-1]
+    assert "disk usage check" in tbody
+    assert "systemctl restart nginx" not in tbody
+
+    # 서버 필터
+    resp2 = client.get("/history", params={"server": "web-1", "mode": "exec"})
+    body2 = resp2.text.split("<tbody>")[-1]
+    assert "df -h" in body2
+    assert "disk usage check" not in body2
+
+
+def test_fleet_runs_json_shape(client):
+    resp = client.get("/fleet/runs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data.keys()) == {"running", "recent"}
+    assert isinstance(data["running"], list) and isinstance(data["recent"], list)
+
+
+def test_fleet_page_renders_board(client):
+    resp = client.get("/fleet")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "Fleet runs" in body
+    assert "col-running" in body and "col-recent" in body
+    assert "/fleet/runs" in body  # 폴링 엔드포인트 참조

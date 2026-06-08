@@ -6,26 +6,67 @@ ask 폼은 SSH 명령을 실행하므로 GET 금지, POST 만 허용.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from rich.console import Console
 
 from . import __version__
+from .config import VALID_AUTH as _VALID_AUTH
+from .config import VALID_ROLE as _VALID_ROLE
 from .config import Server, load_inventory, load_settings, write_inventory
+from .config import validate_server_input as _validate_server_input
 from .history import record as history_record, search
 from .llm import list_backends, select_backend
-from .ssh import _resolve_jump_chain, open_shell
+from .ssh import open_shell
 
 app = FastAPI(title="clopsctl", version=__version__)
+
+# --- 정적 자산 (vendored xterm.js — CDN 의존 제거, 폐쇄망/오프라인 지원) -------
+# jsdelivr CDN 대신 로컬 서빙 + Subresource Integrity(SRI) 로 공급망 변조 방지.
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _sri_hash(rel_path: str) -> str:
+    """vendored 자산의 sha384 SRI 문자열 ('sha384-<base64>') 계산.
+
+    서빙되는 실제 파일 바이트에서 계산하므로 integrity 속성이 항상 파일과 일치한다.
+    파일이 없으면 빈 문자열 — integrity 속성을 생략해 페이지는 계속 동작한다.
+    """
+    fp = STATIC_DIR / rel_path
+    try:
+        digest = hashlib.sha384(fp.read_bytes()).digest()
+    except OSError:
+        return ""
+    return "sha384-" + base64.b64encode(digest).decode("ascii")
+
+
+# import 시 1회 계산 (작은 파일들, 시작 비용 무시 가능).
+_SRI = {
+    "xterm.js": _sri_hash("vendor/xterm.min.js"),
+    "xterm.css": _sri_hash("vendor/xterm.min.css"),
+    "fit": _sri_hash("vendor/xterm-addon-fit.min.js"),
+    "search": _sri_hash("vendor/xterm-addon-search.min.js"),
+}
+
+
+def _sri_attr(key: str) -> str:
+    """integrity + crossorigin 속성 문자열. 해시 계산 실패 시 빈 문자열."""
+    h = _SRI.get(key) or ""
+    return f" integrity='{h}' crossorigin='anonymous'" if h else ""
 
 
 # --- in-memory job 관리 (단일 프로세스 가정) ----------------------------------
@@ -36,6 +77,13 @@ class Job:
     queue: Queue = field(default_factory=Queue)
     started_at: float = field(default_factory=time.monotonic)
     done: bool = False
+    # fleet 대시보드용 메타 (어떤 run 이 무슨 서버에서 도는지 한눈에 보기)
+    targets: list[str] = field(default_factory=list)
+    prompt: str = ""
+    backend_name: str = ""
+    dry_run: bool = False
+    created_wall: float = field(default_factory=time.time)
+    result: dict[str, Any] | None = None  # 완료 시 {n_steps,n_blocked,n_failed} 기록
 
 
 JOBS: dict[str, Job] = {}
@@ -197,6 +245,9 @@ a:hover { color: var(--accent-hover); }
 .term-toolbar .spacer { flex: 1; }
 .term-toolbar .toggle { display: inline-flex; align-items: center; gap: .35rem; cursor: pointer; user-select: none; font-size: .85rem; padding: .25rem .55rem; border: 1px solid var(--border); border-radius: 5px; background: white; }
 .term-toolbar .toggle.on { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
+.term-search { display: inline-flex; align-items: center; gap: .25rem; }
+.term-search input[type=text] { width: 11rem; }
+.term-search .btn-link { padding: .25rem .5rem; }
 .term-shortcuts { font-size: .75rem; color: var(--muted); padding: 0 .25rem .5rem; }
 .term-shortcuts kbd { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 0 .35rem; font-family: ui-monospace, monospace; font-size: .7rem; }
 .term-grid { display: grid; grid-template-columns: 1fr; gap: .8rem; }
@@ -224,6 +275,75 @@ a:hover { color: var(--accent-hover); }
 
 /* 터미널 페이지 — 브라우저 전체 폭 사용 */
 body.term-fullwidth main.container { max-width: none; padding-left: 1rem; padding-right: 1rem; }
+
+/* ask step 타임라인 (Plan→Execute→Summarize 시각화) */
+.timeline { list-style: none; margin: 0 0 1rem; padding: 0; display: flex; flex-wrap: wrap; gap: .5rem; }
+.timeline .phase {
+  flex: 1; min-width: 150px; border: 1px solid var(--border); border-radius: 8px;
+  padding: .6rem .75rem; background: var(--surface); transition: border-color .15s, background .15s;
+}
+.timeline .phase .phase-name { font-weight: 600; font-size: .82rem; display: flex; align-items: center; gap: .4rem; }
+.timeline .phase .phase-name .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); flex: none; }
+.timeline .phase .phase-meta { font-size: .72rem; color: var(--muted); margin-top: .25rem; min-height: 1em; }
+.timeline .phase.active { border-color: var(--accent); background: rgba(37,99,235,.06); }
+.timeline .phase.active .phase-name .dot { background: var(--accent); animation: pulse 1.1s infinite; }
+.timeline .phase.done { border-color: var(--ok); }
+.timeline .phase.done .phase-name .dot { background: var(--ok); }
+.timeline .phase.err { border-color: var(--err); }
+.timeline .phase.err .phase-name .dot { background: var(--err); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.step-list { margin: 0; padding: 0; list-style: none; }
+.step-list .step { display: flex; gap: .5rem; padding: .35rem .5rem; border-bottom: 1px dashed var(--border); font-size: .82rem; align-items: baseline; }
+.step-list .step:last-child { border-bottom: 0; }
+.step-list .step .st-icon { width: 1.2em; flex: none; }
+.step-list .step.ok .st-icon { color: var(--ok); }
+.step-list .step.err .st-icon { color: var(--err); }
+.step-list .step.blocked .st-icon { color: var(--warn); }
+details.raw-log summary { cursor: pointer; font-size: .8rem; color: var(--muted); margin-top: .6rem; }
+
+/* fleet runs 대시보드 (In-progress / Ready 보드) */
+.board { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.board-col h3 { display: flex; align-items: center; gap: .4rem; }
+.board-col .count { background: var(--code-bg); color: var(--muted); border-radius: 999px; padding: 0 .5rem; font-size: .72rem; }
+.run-card { border: 1px solid var(--border); border-left: 3px solid var(--muted); border-radius: 8px; padding: .65rem .8rem; margin-bottom: .7rem; background: var(--surface); }
+.run-card.running { border-left-color: var(--accent); }
+.run-card.ok { border-left-color: var(--ok); }
+.run-card.warn { border-left-color: var(--warn); }
+.run-card .run-head { display: flex; align-items: center; gap: .5rem; font-size: .8rem; }
+.run-card .run-head .spacer { flex: 1; }
+.run-card .run-prompt { font-size: .82rem; margin: .35rem 0; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-card .run-meta { font-size: .72rem; color: var(--muted); }
+.filter-bar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end; }
+.filter-bar > div { display: flex; flex-direction: column; gap: .2rem; }
+.filter-bar label { font-size: .75rem; color: var(--muted); }
+.filter-bar input, .filter-bar select { padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: .85rem; }
+
+/* 다크모드 — html[data-theme='dark'] (토글, localStorage 영속) */
+html[data-theme='dark'] {
+  --bg: #0d1117; --surface: #161b22; --border: #2b313b; --text: #e6edf3;
+  --muted: #8b949e; --accent: #4493f8; --accent-hover: #6aa8ff;
+  --ok: #3fb950; --warn: #d29922; --err: #f85149; --code-bg: #1c2128;
+  color-scheme: dark;
+}
+html[data-theme='dark'] table th { background: #1c2128; color: var(--text); }
+html[data-theme='dark'] form textarea,
+html[data-theme='dark'] form input[type='text'],
+html[data-theme='dark'] form input[type='number'],
+html[data-theme='dark'] form select,
+html[data-theme='dark'] .filter-bar input,
+html[data-theme='dark'] .filter-bar select { background: #0d1117; color: var(--text); }
+html[data-theme='dark'] form .checkbox-group label { background: #1c2128; }
+html[data-theme='dark'] form .checkbox-group label:hover { background: #21262d; }
+html[data-theme='dark'] .btn-link { background: #1c2128; color: var(--text); }
+html[data-theme='dark'] .btn-link:hover { background: #21262d; color: var(--text); }
+html[data-theme='dark'] .panel { background: #12161c; }
+html[data-theme='dark'] .panel.ok { background: #0f1f15; }
+html[data-theme='dark'] .panel.warn { background: #211c10; }
+html[data-theme='dark'] .panel.err { background: #211615; }
+html[data-theme='dark'] .turn-prior, html[data-theme='dark'] .term-toolbar { background: #12161c; }
+html[data-theme='dark'] .banner { background: #211c10; border-color: #3b3115; color: #e3b341; }
+.theme-toggle { background: transparent; border: 1px solid #334155; color: #cbd5e1; border-radius: 5px; padding: .2rem .55rem; font-size: .8rem; cursor: pointer; }
+.theme-toggle:hover { background: rgba(255,255,255,.08); color: white; }
 """
 
 
@@ -233,13 +353,20 @@ def _layout(title: str, body: str, body_class: str = "") -> str:
 <html lang='ko'><head>
   <meta charset='utf-8'>
   <title>{_e(title)}</title>
+  <script>
+  (function(){{try{{var t=localStorage.getItem('clopsctl-theme');if(t!=='dark'&&t!=='light'){{t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}}document.documentElement.setAttribute('data-theme',t);}}catch(e){{}}}})();
+  function clopsToggleTheme(){{var h=document.documentElement;var n=h.getAttribute('data-theme')==='dark'?'light':'dark';h.setAttribute('data-theme',n);try{{localStorage.setItem('clopsctl-theme',n);}}catch(e){{}}}}
+  </script>
   <style>{_PAGE_CSS}</style>
 </head><body{cls_attr}>
   <header class='topbar'>
     <span class='brand'><span class='dot'></span>clopsctl <span class='ver'>v{_e(__version__)}</span></span>
     <nav class='nav'>
       <a href='/'>Home</a>
+      <a href='/fleet'>Fleet</a>
+      <a href='/history'>History</a>
       <a href='/healthz'>Health</a>
+      <button type='button' class='theme-toggle' onclick='clopsToggleTheme()' title='다크/라이트 전환'>🌓 테마</button>
     </nav>
   </header>
   <main class='container'>
@@ -372,7 +499,10 @@ def index() -> str:
     </section>
 
     <section class='card'>
-      <h2>Recent history <span class='muted' style='font-weight:normal'>(last 20)</span></h2>
+      <div class='section-head'>
+        <h2>Recent history <span class='muted' style='font-weight:normal'>(last 20)</span></h2>
+        <a href='/history' class='btn-link'>전체 검색 / 필터 →</a>
+      </div>
       <table class='dense'><thead><tr>
         <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
       </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
@@ -421,6 +551,11 @@ def _run_ask_job(
                 }
             )
     finally:
+        job.result = {
+            "n_steps": captured["n_steps"],
+            "n_blocked": captured["n_blocked"],
+            "n_failed": captured["n_failed"],
+        }
         emit({"type": "_eof"})
         job.done = True
 
@@ -485,7 +620,13 @@ def ask_post(
         CONVERSATIONS[conv.id] = conv
     prior_turns = list(conv.turns)  # 시작 시점 snapshot
 
-    job = Job(id=uuid.uuid4().hex)
+    job = Job(
+        id=uuid.uuid4().hex,
+        targets=list(targets),
+        prompt=prompt,
+        backend_name=sel_backend.name,
+        dry_run=is_dry,
+    )
     JOBS[job.id] = job
 
     Thread(
@@ -525,7 +666,13 @@ def ask_post(
       <h3>프롬프트</h3>
       <pre>{_e(prompt)}</pre>
       <h3>진행 <span class='muted' id='status-badge' style='font-weight:normal'>· 시작 중…</span></h3>
-      <div id='log'></div>
+      <ol class='timeline'>
+        <li class='phase' id='ph-plan'><div class='phase-name'><span class='dot'></span>Plan</div><div class='phase-meta' id='ph-plan-meta'>대기</div></li>
+        <li class='phase' id='ph-exec'><div class='phase-name'><span class='dot'></span>Execute</div><div class='phase-meta' id='ph-exec-meta'>대기</div></li>
+        <li class='phase' id='ph-sum'><div class='phase-name'><span class='dot'></span>Summarize</div><div class='phase-meta' id='ph-sum-meta'>대기</div></li>
+      </ol>
+      <ul class='step-list' id='steps'></ul>
+      <details class='raw-log'><summary>원시 이벤트 로그 보기</summary><div id='log'></div></details>
       <h3 style='margin-top:1rem'>답변</h3>
       <div id='answer' class='panel'><i class='muted'>(생성 중…)</i></div>
     </section>
@@ -562,6 +709,26 @@ def ask_post(
         d.appendChild(document.createTextNode(s == null ? '' : String(s)));
         return d.innerHTML;
       }}
+      var stepsEl = document.getElementById('steps');
+      var execCount = 0;
+      function setPhase(id, state, meta) {{
+        var el = document.getElementById('ph-' + id);
+        if (el) el.className = 'phase' + (state ? ' ' + state : '');
+        var m = document.getElementById('ph-' + id + '-meta');
+        if (m && meta != null) m.textContent = meta;
+      }}
+      function addStep(icon, text, klass) {{
+        var li = document.createElement('li');
+        li.className = 'step ' + (klass || '');
+        li.innerHTML = '<span class="st-icon">' + icon + '</span><span>' + text + '</span>';
+        stepsEl.appendChild(li);
+      }}
+      function failActivePhase() {{
+        ['plan','exec','sum'].forEach(function(id) {{
+          var el = document.getElementById('ph-' + id);
+          if (el && el.classList.contains('active')) el.className = 'phase err';
+        }});
+      }}
       function enableFollowup() {{
         var card = document.getElementById('followup-card');
         var input = document.getElementById('followup-prompt');
@@ -578,35 +745,55 @@ def ask_post(
               statusBadge.textContent = '· 진행 중';
               appendRow('▸', 'started — backend <b>' + escapeHtml(e.backend) + '</b>'); break;
             case 'plan_start':
+              setPhase('plan', 'active', '계획 수립 중…');
               appendRow('…', 'planning'); break;
             case 'plan_done':
+              setPhase('plan', 'done', e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's') + ' 계획됨');
+              setPhase('exec', 'active', '실행 대기');
               appendRow('✓', 'plan ready (' + e.n_steps + ' step' + (e.n_steps === 1 ? '' : 's') + ')', 'evt-ok'); break;
             case 'step_start':
+              addStep('→', '<b>' + escapeHtml((e.servers || []).join(', ')) + '</b> :: <code>' + escapeHtml(e.command) + '</code>');
               appendRow('→', '<b>' + escapeHtml((e.servers || []).join(', ')) + '</b> :: <code>' + escapeHtml(e.command) + '</code>');
               break;
             case 'step_result':
               var ok = e.exit_code === 0;
+              execCount++;
+              setPhase('exec', 'active', execCount + ' step 실행됨');
+              addStep(ok ? '✓' : '✗',
+                escapeHtml(e.server) + ' exit=' + escapeHtml(e.exit_code) +
+                (e.stdout_preview ? ' <span class="muted">— ' + escapeHtml(e.stdout_preview.split('\\n')[0].slice(0, 80)) + '</span>' : ''),
+                ok ? 'ok' : 'err');
               appendRow(ok ? '✓' : '✗',
                 escapeHtml(e.server) + ' exit=' + escapeHtml(e.exit_code) +
                 (e.stdout_preview ? ' <span class="muted">— ' + escapeHtml(e.stdout_preview.split('\\n')[0].slice(0, 80)) + '</span>' : ''),
                 ok ? 'evt-ok' : 'evt-failed'); break;
             case 'step_blocked':
+              addStep('⊘', 'blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>', 'blocked');
               appendRow('⊘', 'blocked (' + escapeHtml(e.reason) + '): <code>' + escapeHtml(e.command) + '</code>', 'evt-blocked'); break;
             case 'step_failed':
+              addStep('✗', 'failed — ' + escapeHtml(e.reason), 'err');
               appendRow('✗', 'failed — ' + escapeHtml(e.reason), 'evt-failed'); break;
             case 'step_dry_run':
+              execCount++;
+              setPhase('exec', 'active', execCount + ' step (dry-run)');
+              addStep('∘', 'dry-run: <code>' + escapeHtml(e.command) + '</code>');
               appendRow('∘', 'dry-run: <code>' + escapeHtml(e.command) + '</code>'); break;
             case 'summarize_start':
+              setPhase('exec', 'done', execCount + ' step 완료');
+              setPhase('sum', 'active', '요약 생성 중…');
               appendRow('…', 'summarizing'); break;
             case 'done':
               answer.innerHTML = '<pre>' + escapeHtml(e.final_text) + '</pre>';
               answer.classList.add(e.n_failed === 0 && e.n_blocked === 0 ? 'ok' : 'warn');
+              setPhase('exec', 'done', e.n_steps + ' step · blocked ' + e.n_blocked + ' · failed ' + e.n_failed);
+              setPhase('sum', e.n_failed === 0 ? 'done' : 'err', '완료');
               appendRow('✓', '<b>done</b> — steps=' + e.n_steps + ' blocked=' + e.n_blocked + ' failed=' + e.n_failed, 'evt-ok');
               statusBadge.textContent = '· 완료';
               enableFollowup(); break;
             case 'error':
               answer.innerHTML = '<pre>error: ' + escapeHtml(e.message) + '</pre>';
               answer.classList.add('err');
+              failActivePhase();
               appendRow('✗', '<b>error</b> — ' + escapeHtml(e.message), 'evt-failed');
               statusBadge.textContent = '· 에러';
               enableFollowup(); break;
@@ -654,11 +841,234 @@ def ask_stream(job_id: str):
     )
 
 
+# --- History 검색/필터 페이지 -------------------------------------------------
+
+_HISTORY_MODES = ("exec", "ask", "terminal_start", "terminal", "terminal_end")
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page(q: str = "", server: str = "", mode: str = "", limit: int = 50) -> str:
+    """히스토리 웹 검색/필터 — 서버·모드·키워드(grep)로 좁혀 조회."""
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    limit = max(1, min(limit, 500))
+
+    rows = search(
+        settings.history_db,
+        server=server or None,
+        mode=mode or None,
+        grep=q.strip() or None,
+        limit=limit,
+    )
+
+    server_opts = "<option value=''>(전체 서버)</option>" + "".join(
+        f"<option value='{_e(name)}'{' selected' if name == server else ''}>{_e(name)}</option>"
+        for name in inventory
+    )
+    mode_opts = "<option value=''>(전체 모드)</option>" + "".join(
+        f"<option value='{_e(m)}'{' selected' if m == mode else ''}>{_e(m)}</option>"
+        for m in _HISTORY_MODES
+    )
+
+    body = f"""
+    <section class='card'>
+      <div class='section-head'><h2>History 검색</h2>
+        <span class='muted'>{len(rows)} 건 · 최대 {limit}</span>
+      </div>
+      <form method='GET' action='/history' class='filter-bar'>
+        <div style='flex:2; min-width:220px'>
+          <label for='q'>키워드 (command / prompt / stdout)</label>
+          <input type='text' id='q' name='q' value='{_e(q)}' placeholder='예) disk, systemctl…'>
+        </div>
+        <div>
+          <label for='server'>서버</label>
+          <select id='server' name='server'>{server_opts}</select>
+        </div>
+        <div>
+          <label for='mode'>모드</label>
+          <select id='mode' name='mode'>{mode_opts}</select>
+        </div>
+        <div>
+          <label for='limit'>limit</label>
+          <input type='number' id='limit' name='limit' value='{limit}' min='1' max='500' style='width:6rem'>
+        </div>
+        <div><button type='submit' class='btn-link btn-primary' style='padding:.45rem .9rem'>검색</button></div>
+        <div><a href='/history' class='btn-link'>초기화</a></div>
+      </form>
+    </section>
+
+    <section class='card'>
+      <table class='dense'><thead><tr>
+        <th>id</th><th>ts (UTC)</th><th>server</th><th>mode</th><th>exit</th><th>cmd / prompt</th>
+      </tr></thead><tbody>{_history_rows_html(rows)}</tbody></table>
+    </section>
+    """
+    return _layout("clopsctl — history", body)
+
+
+# --- Fleet runs 대시보드 (superset.sh식 In-progress / Ready 보드) -------------
+
+def _fleet_runs_payload() -> dict[str, list[dict[str, Any]]]:
+    """현재/최근 ask run 스냅샷 — fleet 대시보드 폴링용."""
+    now = time.time()
+    running: list[dict[str, Any]] = []
+    recent: list[dict[str, Any]] = []
+    for job in JOBS.values():
+        item = {
+            "id": job.id,
+            "targets": job.targets,
+            "prompt": job.prompt[:160],
+            "backend": job.backend_name,
+            "dry_run": job.dry_run,
+            "elapsed": round(max(0.0, now - job.created_wall), 1),
+            "done": job.done,
+            "result": job.result,
+        }
+        (recent if job.done else running).append(item)
+    running.sort(key=lambda x: x["elapsed"])
+    recent.sort(key=lambda x: x["elapsed"])
+    return {"running": running, "recent": recent}
+
+
+def _fleet_server_summary(db_path, inventory: dict[str, Server]) -> list[dict[str, Any]]:
+    """서버별 히스토리 집계 (총 실행/실패/최근 활동)."""
+    rows = search(db_path, limit=1000)
+    agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        a = agg.setdefault(r["server"], {"server": r["server"], "runs": 0, "failed": 0, "last_ts": ""})
+        a["runs"] += 1
+        ec = r["exit_code"]
+        if isinstance(ec, int) and ec != 0:
+            a["failed"] += 1
+        if r["ts"] > a["last_ts"]:
+            a["last_ts"] = r["ts"]
+    for name in inventory:
+        agg.setdefault(name, {"server": name, "runs": 0, "failed": 0, "last_ts": ""})
+    return sorted(agg.values(), key=lambda x: (-x["runs"], x["server"]))
+
+
+@app.get("/fleet/runs")
+def fleet_runs() -> dict[str, list[dict[str, Any]]]:
+    _cleanup_old_jobs()
+    return _fleet_runs_payload()
+
+
+@app.get("/fleet", response_class=HTMLResponse)
+def fleet_page() -> str:
+    """fleet 대시보드 — '지금 무엇이 돌고 있나' 한눈에 보기."""
+    _cleanup_old_jobs()
+    settings = load_settings()
+    inventory = load_inventory(settings.inventory_path)
+    summary = _fleet_server_summary(settings.history_db, inventory)
+
+    if summary:
+        parts = []
+        for s in summary:
+            if s["failed"]:
+                failed_cell = f"<span class='badge role-sudo'>{_e(s['failed'])}</span>"
+            else:
+                failed_cell = "<span class='muted'>0</span>"
+            last_ts = s["last_ts"][:19] or "—"
+            parts.append(
+                f"<tr><td><b>{_e(s['server'])}</b></td>"
+                f"<td>{_e(s['runs'])}</td>"
+                f"<td>{failed_cell}</td>"
+                f"<td class='muted'>{_e(last_ts)}</td></tr>"
+            )
+        summary_rows = "".join(parts)
+    else:
+        summary_rows = "<tr><td colspan='4' class='muted'><i>(히스토리 없음)</i></td></tr>"
+
+    body = f"""
+    <section class='card'>
+      <div class='section-head'>
+        <h2>Fleet runs <span class='muted' style='font-weight:normal'>· ask 실행 보드</span></h2>
+        <span class='muted' id='fleet-updated'>3초마다 자동 새로고침</span>
+      </div>
+      <div class='board'>
+        <div class='board-col'>
+          <h3>In-progress <span class='count' id='cnt-running'>0</span></h3>
+          <div id='col-running'><p class='muted'><i>로딩…</i></p></div>
+        </div>
+        <div class='board-col'>
+          <h3>Ready / 완료 <span class='count' id='cnt-recent'>0</span></h3>
+          <div id='col-recent'><p class='muted'><i>로딩…</i></p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class='card'>
+      <h2>서버별 활동 <span class='muted' style='font-weight:normal'>(history 집계)</span></h2>
+      <table class='dense fleet-summary'><thead><tr>
+        <th>server</th><th>runs</th><th>failed</th><th>last activity (UTC)</th>
+      </tr></thead><tbody>{summary_rows}</tbody></table>
+    </section>
+
+    <script>
+    (function() {{
+      function escapeHtml(s) {{
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s == null ? '' : String(s)));
+        return d.innerHTML;
+      }}
+      function fmtElapsed(s) {{
+        if (s < 60) return Math.round(s) + 's';
+        var m = Math.floor(s / 60); return m + 'm ' + Math.round(s % 60) + 's';
+      }}
+      function runCard(r, running) {{
+        var warn = r.result && ((r.result.n_failed || 0) > 0 || (r.result.n_blocked || 0) > 0);
+        var cls = running ? 'running' : (warn ? 'warn' : 'ok');
+        var status = running
+          ? '<b style="color:var(--accent)">● 진행 중</b>'
+          : (warn ? '<b style="color:var(--warn)">⚠ 완료</b>' : '<b style="color:var(--ok)">✓ 완료</b>');
+        var res = r.result
+          ? (' · steps ' + r.result.n_steps + ' · blocked ' + r.result.n_blocked + ' · failed ' + r.result.n_failed)
+          : '';
+        var tgt = escapeHtml((r.targets || []).join(', ')) || '<span class="muted">(no target)</span>';
+        return '<div class="run-card ' + cls + '">'
+          + '<div class="run-head">' + status + '<span class="spacer"></span><span class="run-meta">' + fmtElapsed(r.elapsed) + '</span></div>'
+          + '<div class="run-prompt">' + (escapeHtml(r.prompt) || '<span class="muted">(빈 프롬프트)</span>') + '</div>'
+          + '<div class="run-meta">' + tgt + ' · ' + escapeHtml(r.backend) + (r.dry_run ? ' · dry-run' : '') + res + '</div>'
+          + '</div>';
+      }}
+      function renderCol(id, items, running) {{
+        var el = document.getElementById(id);
+        if (!items.length) {{ el.innerHTML = '<p class="muted"><i>(없음)</i></p>'; return; }}
+        el.innerHTML = items.map(function(r) {{ return runCard(r, running); }}).join('');
+      }}
+      function refresh() {{
+        fetch('/fleet/runs').then(function(r) {{ return r.json(); }}).then(function(d) {{
+          document.getElementById('cnt-running').textContent = d.running.length;
+          document.getElementById('cnt-recent').textContent = d.recent.length;
+          renderCol('col-running', d.running, true);
+          renderCol('col-recent', d.recent, false);
+        }}).catch(function() {{}});
+      }}
+      refresh();
+      setInterval(refresh, 3000);
+    }})();
+    </script>
+    """
+    return _layout("clopsctl — fleet", body)
+
+
 # --- Interactive SSH terminal (xterm.js + WebSocket + paramiko PTY) ----------
 
-XTERM_CDN_JS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
-XTERM_CDN_CSS = "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
-XTERM_FIT_CDN = "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
+def _tmux_session_name(server_name: str) -> str:
+    """server name → 안전한 tmux 세션명 'clopsctl-<safe>'.
+
+    tmux 세션명에서 문제되는 문자(`.`, `:`, 공백 등)를 `_` 로 치환한다.
+    server name 규칙은 영숫자/_/-/. 를 허용하므로 `.` 만 실질적으로 치환된다.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in server_name)
+    return f"clopsctl-{safe}"
+
+
+# vendored 로컬 자산 (JAE-109: CDN 제거). 버전: xterm 5.3.0 / fit 0.8.0 / search 0.13.0.
+XTERM_JS = "/static/vendor/xterm.min.js"
+XTERM_CSS = "/static/vendor/xterm.min.css"
+XTERM_FIT_JS = "/static/vendor/xterm-addon-fit.min.js"
+XTERM_SEARCH_JS = "/static/vendor/xterm-addon-search.min.js"
 
 
 @app.get("/terminal/{name}", response_class=HTMLResponse)
@@ -703,7 +1113,7 @@ def terminal_page(name: str) -> str:
     initial_panel_json = json.dumps([srv.name])
 
     body = f"""
-    <link rel='stylesheet' href='{XTERM_CDN_CSS}'>
+    <link rel='stylesheet' href='{XTERM_CSS}'{_sri_attr('xterm.css')}>
 
     <section class='card'>
       <div class='section-head'>
@@ -731,6 +1141,11 @@ def terminal_page(name: str) -> str:
           <option value='4'>4</option>
           <option value='auto'>auto (480px 자동 wrap)</option>
         </select>
+        <span class='term-search'>
+          <input type='text' id='search-input' placeholder='활성 panel 검색…' title='Ctrl+Shift+F'>
+          <button type='button' class='btn-link' id='search-prev' title='이전 (Shift+Enter)'>↑</button>
+          <button type='button' class='btn-link' id='search-next' title='다음 (Enter)'>↓</button>
+        </span>
         <span class='spacer'></span>
         <label class='toggle' id='broadcast-toggle' title='켜진 panel 모두에 동시 입력'>
           <input type='checkbox' id='broadcast-cb' style='accent-color:#c2410c'>
@@ -753,8 +1168,9 @@ def terminal_page(name: str) -> str:
       <div id='term-grid' class='term-grid'></div>
     </section>
 
-    <script src='{XTERM_CDN_JS}'></script>
-    <script src='{XTERM_FIT_CDN}'></script>
+    <script src='{XTERM_JS}'{_sri_attr('xterm.js')}></script>
+    <script src='{XTERM_FIT_JS}'{_sri_attr('fit')}></script>
+    <script src='{XTERM_SEARCH_JS}'{_sri_attr('search')}></script>
     <script>
     (function() {{
       var WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -764,6 +1180,9 @@ def terminal_page(name: str) -> str:
       var colsSelect = document.getElementById('cols-select');
       var broadcastCb = document.getElementById('broadcast-cb');
       var broadcastBanner = document.getElementById('broadcast-banner');
+      var searchInput = document.getElementById('search-input');
+      var searchPrev = document.getElementById('search-prev');
+      var searchNext = document.getElementById('search-next');
 
       // 행당 panel 수 설정
       function applyCols(value) {{
@@ -827,10 +1246,13 @@ def terminal_page(name: str) -> str:
           cursorBlink: true,
           fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
           fontSize: 13,
+          scrollback: 10000,
           theme: {{ background: '#0b1220', foreground: '#e2e8f0', cursor: '#60a5fa' }},
         }});
         var fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
+        var search = null;
+        try {{ search = new SearchAddon.SearchAddon(); term.loadAddon(search); }} catch (e) {{}}
         term.open(body_el);
         try {{ fit.fit(); }} catch (e) {{}}
 
@@ -838,7 +1260,7 @@ def terminal_page(name: str) -> str:
         var statusEl = head.querySelector('.pane-status');
         var metaEl = head.querySelector('.meta');
 
-        var panel = {{ name: name, el: el, term: term, fit: fit, ws: ws }};
+        var panel = {{ name: name, el: el, term: term, fit: fit, ws: ws, search: search }};
         panels.push(panel);
         var myIdx = panels.length - 1;
 
@@ -912,8 +1334,33 @@ def terminal_page(name: str) -> str:
         if (name) addPanel(name);
       }});
 
+      // 검색 — 활성 panel 의 scrollback 을 대상으로 함
+      function runSearch(forward) {{
+        if (activeIdx < 0 || activeIdx >= panels.length) return;
+        var p = panels[activeIdx];
+        var q = searchInput.value;
+        if (!p.search || !q) return;
+        try {{
+          if (forward) p.search.findNext(q);
+          else p.search.findPrevious(q);
+        }} catch (e) {{}}
+      }}
+      searchNext.addEventListener('click', function() {{ runSearch(true); }});
+      searchPrev.addEventListener('click', function() {{ runSearch(false); }});
+      searchInput.addEventListener('keydown', function(ev) {{
+        if (ev.key === 'Enter') {{ runSearch(!ev.shiftKey); ev.preventDefault(); }}
+        else if (ev.key === 'Escape') {{ searchInput.value = ''; searchInput.blur(); }}
+      }});
+
       // 키보드 단축키
       window.addEventListener('keydown', function(ev) {{
+        // Ctrl+Shift+F → 검색창 포커스
+        if (ev.ctrlKey && ev.shiftKey && (ev.key === 'F' || ev.key === 'f')) {{
+          searchInput.focus();
+          searchInput.select();
+          ev.preventDefault();
+          return;
+        }}
         // Alt + 1..9 → panel 직접 선택
         if (ev.altKey && !ev.ctrlKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {{
           var idx = parseInt(ev.key, 10) - 1;
@@ -1017,6 +1464,15 @@ async def terminal_ws(ws: WebSocket, name: str) -> None:
             )
             await ws.close(code=4500, reason="connect failed")
         return
+
+    # tmux 세션 지속성 (JAE-109): tmux=true 서버는 접속 즉시 tmux 세션에 attach.
+    # 끊겨도 세션이 살아있어 재접속 시 진행 중 작업이 그대로 보존된다.
+    # tmux 미설치 시 "command not found" 후 일반 셸로 떨어짐 — 그래도 동작은 한다.
+    if srv.tmux:
+        try:
+            channel.send(f" tmux new-session -A -s {_tmux_session_name(srv.name)}\n")
+        except Exception:  # noqa: BLE001
+            pass  # best-effort — 주입 실패해도 일반 셸은 유지
 
     closed = False
 
@@ -1144,12 +1600,6 @@ def healthz() -> dict[str, object]:
 
 # --- 인벤토리 CRUD --------------------------------------------------------------
 
-import re as _re
-
-_NAME_RE = _re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
-_VALID_AUTH = ("agent", "pem", "password")
-_VALID_ROLE = ("read-only", "shell", "sudo")
-
 
 def _server_form_html(
     *,
@@ -1170,6 +1620,7 @@ def _server_form_html(
     role_v = s.role if s else "read-only"
     tags_v = ", ".join(s.tags) if s and s.tags else ""
     jump_v = s.jump or "" if s else ""
+    tmux_checked = " checked" if (s and s.tmux) else ""
 
     auth_opts = "".join(
         f"<option value='{a}'{' selected' if a == auth_v else ''}>{a}</option>"
@@ -1266,90 +1717,20 @@ def _server_form_html(
         </div>
 
         <div class='row'>
+          <label class='toggle' style='display:inline-flex;align-items:center;gap:.4rem;cursor:pointer'>
+            <input type='checkbox' name='tmux' value='true'{tmux_checked}>
+            <span>tmux 세션 지속성</span>
+          </label>
+          <p class='muted' style='font-size:.78rem;margin:.25rem 0 0'>웹 터미널 접속 시 <code>tmux new -A -s clopsctl-{_e(name_v) or "&lt;name&gt;"}</code> 자동 attach. 끊겨도 세션 유지 (원격에 tmux 설치 필요).</p>
+        </div>
+
+        <div class='row'>
           <button type='submit'>{'저장' if is_edit else '추가'}</button>
           &nbsp;<a href='/' class='btn-link'>취소</a>
         </div>
       </form>
     </section>
     """
-
-
-def _validate_server_input(
-    form: dict[str, str],
-    inventory: dict[str, Server],
-    *,
-    is_edit: bool,
-) -> tuple[Server | None, list[str]]:
-    """폼 dict 를 검증하고 (Server | None, errors) 반환."""
-    errors: list[str] = []
-    name = (form.get("name") or "").strip()
-    host = (form.get("host") or "").strip()
-    user = (form.get("user") or "").strip()
-    port_raw = (form.get("port") or "22").strip()
-    auth = (form.get("auth") or "agent").strip()
-    pem_path = (form.get("pem_path") or "").strip() or None
-    password_env = (form.get("password_env") or "").strip() or None
-    role = (form.get("role") or "read-only").strip()
-    tags_raw = (form.get("tags") or "").strip()
-    jump = (form.get("jump") or "").strip() or None
-
-    if not name:
-        errors.append("name 이 비어있습니다.")
-    elif not _NAME_RE.match(name):
-        errors.append(f"name '{name}' 은 영숫자·_·-·. 만 허용합니다.")
-    elif not is_edit and name in inventory:
-        errors.append(f"name '{name}' 가 이미 존재합니다.")
-
-    if not host:
-        errors.append("host 가 비어있습니다.")
-    if not user:
-        errors.append("user 가 비어있습니다.")
-
-    try:
-        port = int(port_raw)
-        if not (1 <= port <= 65535):
-            raise ValueError
-    except ValueError:
-        errors.append(f"port '{port_raw}' 가 1-65535 범위를 벗어납니다.")
-        port = 22
-
-    if auth not in _VALID_AUTH:
-        errors.append(f"auth '{auth}' 는 {list(_VALID_AUTH)} 중 하나여야 합니다.")
-    if role not in _VALID_ROLE:
-        errors.append(f"role '{role}' 는 {list(_VALID_ROLE)} 중 하나여야 합니다.")
-
-    if auth == "pem" and not pem_path:
-        errors.append("auth=pem 인 경우 pem_path 가 필요합니다.")
-    if auth == "password" and not password_env:
-        errors.append("auth=password 인 경우 password_env (환경변수 이름) 가 필요합니다.")
-
-    tags: tuple[str, ...] = tuple(t.strip() for t in tags_raw.split(",") if t.strip())
-
-    if jump:
-        if jump == name:
-            errors.append("jump 가 자기 자신을 가리킵니다.")
-        elif jump not in inventory:
-            errors.append(f"jump '{jump}' 는 인벤토리에 없는 서버입니다.")
-
-    if errors:
-        return None, errors
-
-    server = Server(
-        name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
-        pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
-        tags=tags, jump=jump,
-    )
-
-    # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출
-    new_inv = dict(inventory)
-    new_inv[name] = server
-    try:
-        _resolve_jump_chain(server, new_inv)
-    except ValueError as exc:
-        errors.append(f"jump 검증 실패: {exc}")
-        return None, errors
-
-    return server, []
 
 
 @app.get("/servers/new", response_class=HTMLResponse)

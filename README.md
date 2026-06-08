@@ -50,6 +50,18 @@ pip install -e .
 
 ### 3. 설정
 
+가장 쉬운 방법은 대화형 마법사다. 로컬 AI CLI(claude/gemini/codex)가 있으면
+자연어 설명을 구조화해 인벤토리를 채우고, 없으면 순수 프롬프트 입력으로 폴백한다.
+
+```bash
+clopsctl init
+# 서버를 자연어로 설명 → 검증 → 미리보기 → servers.toml + .env 자동 생성 (chmod 600)
+# 미리보기만: clopsctl init --dry-run
+# AI 없이 직접 입력: clopsctl init --backend manual
+```
+
+수동 설정을 원하면 템플릿을 직접 복사한다:
+
 ```bash
 cp .env.example .env
 chmod 600 .env
@@ -125,6 +137,7 @@ ruff check .
 - [x] Phase 3-e: 인벤토리 CRUD web UI (모든 Server 필드 폼 + jump 드롭다운 + cycle 검증)
 - [x] Phase 4-a: 대화형 follow-up (Conversation, prior_turns, 이전 turn 카드 누적)
 - [x] Phase 4-b: 인터랙티브 SSH 터미널 UI (xterm.js + WebSocket + paramiko PTY, role gate, 명령 buffer 기록, 다중 세션)
+- [x] Phase 4-b-3: 터미널 강화 (JAE-109) — tmux 세션 지속성(인벤토리 `tmux=true`), xterm.js 로컬 vendoring + SRI(CDN 의존 제거), 스크롤백 10k + 검색 addon
 - [x] JAE-107: 부트스트랩(`scripts/install.sh`) + 백그라운드 start/stop 스크립트 + systemd/launchd 템플릿 (Linux 실검증)
 - [ ] Phase 3-c: Windows/macOS 실제 PoC 검증 (호환성 매트릭스 채우기 — macOS install/start/stop 실검증 포함)
 

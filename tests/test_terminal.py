@@ -138,8 +138,8 @@ def test_terminal_page_renders_multi_pane_for_shell_role(client):
 def test_terminal_page_inventory_table_shows_jump(client):
     resp = client.get("/terminal/private")
     body = resp.text
-    # 인벤토리 표에 jump 배지로 표시
-    assert "<span class=\"badge jump\">bastion</span>" in body
+    # 인벤토리 표에 jump 배지로 표시 (_row 헬퍼는 작은따옴표 속성 사용)
+    assert "<span class='badge jump'>bastion</span>" in body
     # 초기 panel 은 private
     assert '["private"]' in body
 
@@ -282,3 +282,103 @@ def test_websocket_command_buffer_handles_backspace(client, workspace, monkeypat
         "SELECT command FROM commands WHERE mode='terminal'"
     ).fetchall()]
     assert "ls -la" in cmds
+
+
+# --- JAE-109: xterm.js vendoring + SRI ------------------------------------------
+
+def test_terminal_page_uses_vendored_assets_not_cdn(client):
+    """xterm.js 가 jsdelivr CDN 이 아닌 로컬 /static/vendor 에서 로드되어야 한다."""
+    body = client.get("/terminal/app-shell").text
+    assert "jsdelivr" not in body and "cdn." not in body
+    assert "/static/vendor/xterm.min.js" in body
+    assert "/static/vendor/xterm.min.css" in body
+    assert "/static/vendor/xterm-addon-fit.min.js" in body
+    # 스크롤백/검색 addon (item 3)
+    assert "/static/vendor/xterm-addon-search.min.js" in body
+    assert "SearchAddon" in body
+    assert "scrollback: 10000" in body
+    # 검색 UI
+    assert "id='search-input'" in body
+
+
+def test_terminal_page_assets_have_sri_integrity(client):
+    """vendored 자산에 Subresource Integrity(sha384) 속성이 붙어야 한다."""
+    body = client.get("/terminal/app-shell").text
+    assert "integrity='sha384-" in body
+    assert "crossorigin='anonymous'" in body
+
+
+def test_static_vendor_files_served(client):
+    """/static 마운트로 vendored 자산이 실제 서빙된다."""
+    r = client.get("/static/vendor/xterm.min.js")
+    assert r.status_code == 200
+    assert "Terminal" in r.text  # xterm.js 본체
+    assert client.get("/static/vendor/xterm.min.css").status_code == 200
+    assert client.get("/static/vendor/xterm-addon-search.min.js").status_code == 200
+
+
+def test_sri_hash_matches_served_bytes(client):
+    """integrity 해시가 실제 서빙되는 파일 바이트의 sha384 와 일치해야 한다."""
+    import base64
+    import hashlib
+
+    raw = client.get("/static/vendor/xterm.min.js").content
+    expected = "sha384-" + base64.b64encode(hashlib.sha384(raw).digest()).decode()
+    assert web._SRI["xterm.js"] == expected
+
+
+# --- JAE-109: tmux 세션 지속성 ---------------------------------------------------
+
+def test_tmux_session_name_sanitizes_dots():
+    assert web._tmux_session_name("web-1") == "clopsctl-web-1"
+    assert web._tmux_session_name("db.stage.1") == "clopsctl-db_stage_1"
+
+
+TMUX_INVENTORY = """
+[server.tmux-box]
+host = "10.0.0.5"
+user = "ops"
+auth = "agent"
+role = "shell"
+tmux = true
+
+[server.plain-box]
+host = "10.0.0.6"
+user = "ops"
+auth = "agent"
+role = "shell"
+"""
+
+
+@pytest.fixture
+def tmux_client(tmp_path: Path, monkeypatch) -> TestClient:
+    inv = tmp_path / "servers.toml"
+    inv.write_text(TMUX_INVENTORY)
+    monkeypatch.setenv("CLOPSCTL_INVENTORY", str(inv))
+    monkeypatch.setenv("CLOPSCTL_HISTORY_DB", str(tmp_path / "h.sqlite"))
+    monkeypatch.setattr(web, "list_backends", lambda: [("claude", True)])
+    return TestClient(web.app)
+
+
+def test_websocket_injects_tmux_when_enabled(tmux_client, monkeypatch):
+    """tmux=true 서버는 접속 즉시 tmux new-session 명령이 원격으로 주입되어야 한다."""
+    fake_ch = FakeChannel()
+    monkeypatch.setattr(web, "open_shell", lambda s, i, **kw: (fake_ch, [FakeClient()]))
+
+    with tmux_client.websocket_connect("/ws/terminal/tmux-box"):
+        pass
+
+    joined = "".join(fake_ch._sent_to_remote)
+    assert "tmux new-session -A -s clopsctl-tmux-box" in joined
+
+
+def test_websocket_no_tmux_injection_when_disabled(tmux_client, monkeypatch):
+    """tmux 미설정 서버는 tmux 명령을 주입하지 않는다 (기존 동작 보존)."""
+    fake_ch = FakeChannel()
+    monkeypatch.setattr(web, "open_shell", lambda s, i, **kw: (fake_ch, [FakeClient()]))
+
+    with tmux_client.websocket_connect("/ws/terminal/plain-box"):
+        pass
+
+    joined = "".join(fake_ch._sent_to_remote)
+    assert "tmux" not in joined

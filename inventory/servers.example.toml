@@ -17,6 +17,7 @@ user       = "ops"
 auth       = "agent"
 role       = "shell"
 tags       = ["stage", "db"]
+tmux       = true             # 웹 터미널 접속 시 tmux 세션 자동 attach (끊겨도 세션 유지). 원격에 tmux 설치 필요.
 
 # 비밀번호 인증 예시 (지양, 필요한 경우만)
 # [server.legacy]

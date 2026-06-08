@@ -37,6 +37,7 @@ class Server:
     tags: tuple[str, ...] = field(default_factory=tuple)
     jump: str | None = None  # 다른 server name 참조 (bastion). 최대 1단계 chain (총 2 hop)
     tmux: bool = False  # True 면 웹 터미널 접속 시 tmux 세션 자동 attach (세션 지속성)
+    legacy: bool = False  # True 면 구식 SSH 알고리즘(ssh-rsa 등) 협상 허용. HP-UX/Solaris 등 노후 sshd 용
 
 
 @dataclass(slots=True, frozen=True)
@@ -87,6 +88,7 @@ def load_inventory(path: Path) -> dict[str, Server]:
             tags=tuple(cfg.get("tags", [])),
             jump=cfg.get("jump"),
             tmux=bool(cfg.get("tmux", False)),
+            legacy=bool(cfg.get("legacy", False)),
         )
     return servers
 
@@ -110,6 +112,8 @@ def server_to_dict(s: Server) -> dict[str, object]:
         out["jump"] = s.jump
     if s.tmux:
         out["tmux"] = True
+    if s.legacy:
+        out["legacy"] = True
     return out
 
 
@@ -162,6 +166,7 @@ def validate_server_input(
     tags_raw = (form.get("tags") or "").strip()
     jump = (form.get("jump") or "").strip() or None
     tmux = (form.get("tmux") or "").strip().lower() in ("true", "on", "1", "yes")
+    legacy = (form.get("legacy") or "").strip().lower() in ("true", "on", "1", "yes")
 
     if not name:
         errors.append("name 이 비어있습니다.")
@@ -207,7 +212,7 @@ def validate_server_input(
     server = Server(
         name=name, host=host, user=user, port=port, auth=auth,  # type: ignore[arg-type]
         pem_path=pem_path, password_env=password_env, role=role,  # type: ignore[arg-type]
-        tags=tags, jump=jump, tmux=tmux,
+        tags=tags, jump=jump, tmux=tmux, legacy=legacy,
     )
 
     # cycle / 깊이 검증 — 미리 인벤토리에 넣고 _resolve_jump_chain 호출
